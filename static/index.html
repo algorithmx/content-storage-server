@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Content Storage Server - Management Interface</title>
+
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+
+    <!-- Custom CSS -->
+    <link href="/static/css/custom.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <span class="navbar-brand mb-0 h5">
+                <i class="bi bi-server"></i> Content Storage Server Management
+            </span>
+            <!-- Alert area in navbar -->
+            <div class="flex-grow-1 mx-3" id="navbar-alert-container">
+                <!-- Alerts will appear here -->
+            </div>
+            <div class="d-flex align-items-center">
+                <span class="badge bg-success me-2" id="server-status">
+                    <i class="bi bi-circle-fill"></i> Online
+                </span>
+                <button class="btn btn-outline-light btn-sm" onclick="refreshAll()">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid">
+
+        <!-- Three-Column Dashboard Section (1/5 height) -->
+        <div class="dashboard-block">
+            <div class="row g-2">
+            <!-- Server Health Column -->
+            <div class="col-lg-4 col-md-12">
+                <div class="card h-100">
+                    <div class="card-header d-flex justify-content-between align-items-center py-2">
+                        <h6 class="mb-0"><i class="bi bi-heart-pulse"></i> Server Health</h6>
+                        <button class="btn btn-sm btn-outline-primary" onclick="loadHealthData()">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="row g-1">
+                            <div class="col-6">
+                                <div class="text-center">
+                                    <small class="text-muted d-block">Overall Status</small>
+                                    <span class="badge bg-success" id="health-status">Healthy</span>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="text-center">
+                                    <small class="text-muted d-block">Uptime</small>
+                                    <span id="uptime">-</span>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="text-center">
+                                    <small class="text-muted d-block">Content Count</small>
+                                    <span id="content-count">-</span>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="text-center">
+                                    <small class="text-muted d-block">Last Updated</small>
+                                    <span id="last-updated">-</span>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Component Health Status (shown when detailed health is available) -->
+                        <div class="row g-1 mt-2" id="component-health" style="display: none;">
+                            <div class="col-12">
+                                <hr class="my-1">
+                                <small class="text-muted">Component Health:</small>
+                            </div>
+                            <div class="col-6">
+                                <div class="text-center">
+                                    <small class="text-muted d-block">Database</small>
+                                    <span class="badge bg-secondary" id="database-status">Unknown</span>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="text-center">
+                                    <small class="text-muted d-block">Backup</small>
+                                    <span class="badge bg-secondary" id="backup-status">Unknown</span>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="text-center">
+                                    <small class="text-muted d-block">GC</small>
+                                    <span class="badge bg-secondary" id="gc-status">Unknown</span>
+                                </div>
+                            </div>
+                            <div class="col-6">
+                                <div class="text-center">
+                                    <small class="text-muted d-block">Overall</small>
+                                    <span class="badge bg-secondary" id="overall-status">Unknown</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Metrics Column -->
+            <div class="col-lg-4 col-md-12">
+                <div class="card h-100">
+                    <div class="card-header d-flex justify-content-between align-items-center py-2">
+                        <h6 class="mb-0"><i class="bi bi-graph-up"></i> System Metrics</h6>
+                        <button class="btn btn-sm btn-outline-primary" onclick="loadMetrics()">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="row" id="metrics-container">
+                            <div class="col-12 text-center text-muted">
+                                <i class="bi bi-hourglass-split"></i> Loading metrics...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Management Operations Column -->
+            <div class="col-lg-4 col-md-12">
+                <div class="card h-100">
+                    <div class="card-header py-2">
+                        <h6 class="mb-0"><i class="bi bi-tools"></i> Management Operations</h6>
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="d-grid gap-2">
+                            <button class="btn btn-primary btn-sm" onclick="triggerSync(event)">
+                                <i class="bi bi-arrow-repeat"></i> Trigger Sync
+                            </button>
+                            <button class="btn btn-warning btn-sm" onclick="createBackup(event)">
+                                <i class="bi bi-archive"></i> Create Backup
+                            </button>
+                            <button class="btn btn-info btn-sm" onclick="runGarbageCollection(event)">
+                                <i class="bi bi-trash3"></i> Run GC
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="cleanupAccessTrackers(event)">
+                                <i class="bi bi-broom"></i> Cleanup Trackers
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </div>
+        </div>
+
+        <!-- Advanced Metrics Section -->
+        <div class="advanced-metrics-block">
+            <div class="row g-2">
+            <!-- Queue Metrics Column -->
+            <div class="col-lg-6 col-md-12">
+                <div class="card h-100">
+                    <div class="card-header d-flex justify-content-between align-items-center py-2">
+                        <h6 class="mb-0"><i class="bi bi-list-task"></i> Write Queue Metrics</h6>
+                        <button class="btn btn-sm btn-outline-primary" onclick="loadMetrics()">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="row" id="queue-metrics-container">
+                            <div class="col-12 text-center text-muted">
+                                <i class="bi bi-hourglass-split"></i> Loading queue metrics...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Access Manager Stats Column -->
+            <div class="col-lg-6 col-md-12">
+                <div class="card h-100">
+                    <div class="card-header d-flex justify-content-between align-items-center py-2">
+                        <h6 class="mb-0"><i class="bi bi-eye"></i> Access Manager Stats</h6>
+                        <button class="btn btn-sm btn-outline-primary" onclick="loadMetrics()">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+                    <div class="card-body py-2">
+                        <div class="row" id="access-manager-container">
+                            <div class="col-12 text-center text-muted">
+                                <i class="bi bi-hourglass-split"></i> Loading access stats...
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </div>
+        </div>
+
+        <!-- Operation Logs and Backups Section (2/5 height) -->
+        <div class="logs-backups-block">
+            <div class="row g-2">
+            <!-- Recent Operations Log Column -->
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header d-flex justify-content-between align-items-center py-1">
+                        <h6 class="mb-0 small"><i class="bi bi-journal-text"></i> Recent Operations Log</h6>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="clearOperationLogs()">
+                            <i class="bi bi-trash"></i>
+                        </button>
+                    </div>
+                    <div class="card-body p-0">
+                        <div id="operation-logs" class="operation-logs">
+                            <div class="text-muted text-center small p-2">
+                                <i class="bi bi-info-circle"></i> Operation logs will appear here when management operations are triggered.
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Available Backups Column -->
+            <div class="col-md-6">
+                <div class="card h-100">
+                    <div class="card-header d-flex justify-content-between align-items-center py-0">
+                        <h6 class="mb-0 small"><i class="bi bi-archive"></i> Available Backups</h6>
+                        <button class="btn btn-sm btn-outline-primary" onclick="loadBackups()">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+                    <div class="card-body p-0">
+                        <div id="backup-list" class="backup-list">
+                            <div class="d-flex align-items-center justify-content-center h-100">
+                                <div class="text-muted text-center small p-2">
+                                    <i class="bi bi-hourglass-split"></i> Loading backups...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </div>
+        </div>
+
+        <!-- Content Management Section (2/5 height) -->
+        <div class="content-management-block">
+            <div class="row g-2">
+            <div class="col-12">
+                <div class="card h-100">
+                    <div class="card-header d-flex justify-content-between align-items-center py-1">
+                        <div class="d-flex align-items-center">
+                            <h6 class="mb-0 small me-2"><i class="bi bi-files"></i> Content Management</h6>
+                            <span class="badge bg-secondary small me-2" id="content-total-indicator">
+                                Total: <span id="content-total-count">-</span>
+                            </span>
+                        </div>
+                        <div class="d-flex gap-1">
+                            <button class="btn btn-sm btn-primary" onclick="loadContent()" title="Load content from server">
+                                <i class="bi bi-download"></i> Load Content
+                            </button>
+                            <input type="text" class="form-control form-control-sm" id="search-input"
+                                   placeholder="Search content..." style="width: 150px;">
+                            <button class="btn btn-sm btn-outline-primary" onclick="performSearch()" title="Search content">
+                                <i class="bi bi-search"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-secondary" onclick="clearSearch()" title="Clear search">
+                                <i class="bi bi-x-circle"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover table-sm mb-0">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>Type</th>
+                                        <th>Tag</th>
+                                        <th>Created</th>
+                                        <th>Expires</th>
+                                        <th>Access Count</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="content-table-body">
+                                    <tr>
+                                        <td colspan="7" class="text-center text-muted">
+                                            <i class="bi bi-hourglass-split"></i> Loading content...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <!-- Pagination - Fixed at bottom -->
+                        <div class="pagination-container">
+                            <nav aria-label="Content pagination">
+                                <ul class="pagination justify-content-center pagination-sm mb-0" id="pagination">
+                                    <!-- Pagination will be generated by JavaScript -->
+                                </ul>
+                            </nav>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+    <!-- Custom JavaScript -->
+    <script src="/static/js/management.js"></script>
+
+    <script>
+        // Initialize the page
+        document.addEventListener('DOMContentLoaded', function() {
+            // Check if the function exists before calling it
+            if (typeof initializeManagement === 'function') {
+                initializeManagement();
+            } else {
+                console.error('initializeManagement function not found. JavaScript file may not have loaded correctly.');
+                // Show a more user-friendly error message in navbar
+                const alertContainer = document.getElementById('navbar-alert-container');
+                if (alertContainer) {
+                    alertContainer.innerHTML = `
+                        <div class="navbar-alert alert-danger d-flex align-items-center">
+                            <i class="bi bi-exclamation-triangle me-2"></i>
+                            <span class="flex-grow-1">JavaScript Loading Error - Please refresh the page</span>
+                        </div>
+                    `;
+                }
+            }
+        });
+    </script>
+</body>
+</html>

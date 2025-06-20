@@ -1,0 +1,127 @@
+/**
+ * Content Storage Server Management Interface - Concise CSS
+ * Single-page layout that never exceeds window height
+ */
+
+/* Prevent page scrolling */
+html, body { height: 100%; overflow: hidden; background: #f8f9fa; margin: 0; padding: 0; }
+
+/* Fixed navbar */
+.navbar { height: 56px; }
+.navbar .container-fluid { height: 100%; padding: 0; }
+
+/* Navbar alerts */
+.navbar-alert { background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: white; animation: fadeIn 0.3s; }
+.navbar-alert.alert-success { background: rgba(25,135,84,0.8); }
+.navbar-alert.alert-danger { background: rgba(220,53,69,0.8); }
+.navbar-alert.alert-warning { background: rgba(255,193,7,0.8); color: #212529; }
+.navbar-alert .btn-close { filter: invert(1); }
+.navbar-alert.alert-warning .btn-close { filter: none; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* Main layout - flexbox with fixed heights */
+.container-fluid {
+    padding: 0.25rem 0.5rem;
+    height: calc(100vh - 56px);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Block heights: 17+15+30+34 = 96vh + gaps = ~97vh */
+.dashboard-block, .advanced-metrics-block, .logs-backups-block, .content-management-block {
+    overflow: hidden; margin-bottom: 0.25rem; flex-shrink: 0;
+}
+.dashboard-block { height: 17vh; }
+.advanced-metrics-block { height: 15vh; }
+.logs-backups-block { height: 30vh; }
+.content-management-block { height: 34vh; margin-bottom: 0; }
+
+/* All rows fill height */
+.dashboard-block .row, .advanced-metrics-block .row, .logs-backups-block .row, .content-management-block .row { height: 100%; }
+
+/* Cards */
+.card { border: none; box-shadow: 0 1px 3px rgba(0,0,0,0.1); height: 100%; display: flex; flex-direction: column; }
+.card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+.card-body { flex: 1; overflow: hidden; padding: 0.5rem; }
+.logs-backups-block .card-body, .content-management-block .card-body { padding: 0.1rem; overflow-y: auto; }
+
+/* Scrollable areas */
+#operation-logs, #backup-list { height: 100%; overflow-y: auto; max-height: calc(30vh - 60px); }
+
+/* Content management specific layout - ensure pagination is always visible */
+.content-management-block .card {
+    display: flex;
+    flex-direction: column;
+}
+
+.content-management-block .card-body {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+}
+
+.content-management-block .table-responsive {
+    flex: 1;
+    overflow-y: auto;
+    max-height: calc(34vh - 100px); /* Account for header + pagination */
+    min-height: 200px;
+}
+
+.content-management-block .pagination-container {
+    flex-shrink: 0;
+    padding: 0.5rem;
+    border-top: 1px solid #dee2e6;
+    background-color: #f8f9fa;
+}
+
+/* Compact table */
+.table th, .table td { border-top: none; font-size: 0.85rem; padding: 0.2rem; }
+.content-management-block .table th, .content-management-block .table td { font-size: 1rem; }
+
+/* Utilities */
+.text-truncate-responsive { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; }
+.log-entry, .backup-item { padding: 0.25rem 0.375rem; margin-bottom: 0.125rem; border-left: 2px solid #dee2e6; background: #f8f9fa; font-size: 0.75rem; }
+.log-entry.success { border-left-color: #198754; background: rgba(25,135,84,0.05); }
+.log-entry.error { border-left-color: #dc3545; background: rgba(220,53,69,0.05); }
+.backup-item { border: 1px solid #e9ecef; margin-bottom: 0.25rem; }
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+    .container-fluid { padding: 0.25rem; }
+    .dashboard-block { height: 20vh; }
+    .advanced-metrics-block { height: 16vh; }
+    .logs-backups-block { height: 28vh; }
+    .content-management-block { height: 32vh; }
+    .card-body { padding: 0.25rem !important; }
+    .table th, .table td { font-size: 0.75rem; padding: 0.15rem; }
+    .text-truncate-responsive { max-width: 100px; }
+
+    /* Content management mobile adjustments */
+    .content-management-block .table-responsive {
+        max-height: calc(32vh - 90px);
+    }
+    .content-management-block .pagination-container {
+        padding: 0.25rem;
+    }
+}
+
+@media (max-width: 576px) {
+    .container-fluid { padding: 0.125rem; }
+    .dashboard-block { height: 18vh; }
+    .advanced-metrics-block { height: 14vh; }
+    .logs-backups-block { height: 26vh; }
+    .content-management-block { height: 34vh; }
+    .card-header .btn { padding: 0.125rem 0.25rem; font-size: 0.75rem; }
+    .table th, .table td { font-size: 0.7rem; padding: 0.1rem; }
+    .text-truncate-responsive { max-width: 80px; }
+
+    /* Content management extra small screen adjustments */
+    .content-management-block .table-responsive {
+        max-height: calc(34vh - 85px);
+    }
+    .content-management-block .pagination-container {
+        padding: 0.125rem;
+    }
+}
