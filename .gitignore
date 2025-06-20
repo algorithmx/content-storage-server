@@ -25,8 +25,8 @@ storage.test
 go.sum
 
 *.log
-*.csv
-*.json
+stress-test-*.csv
+stress-test-*.json
 *.vlog
 *.mem
 DISCARD
