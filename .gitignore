@@ -14,10 +14,10 @@ notes/*
 scripts/
 scripts/*
 
-server
+
 functional-test
-stress-test
 stress-test-*
+cmd/batch-test
 main
 *-main
 storage.test
