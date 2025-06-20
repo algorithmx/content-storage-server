@@ -22,7 +22,7 @@ A high-performance, enterprise-grade content storage server built with Go, featu
 
 ```bash
 # Clone and build
-git clone <repository-url>
+git clone https://github.com/algorithmx/content-storage-server
 cd content-host
 go mod download
 go build cmd/server
