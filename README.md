@@ -1,4 +1,4 @@
-# Content Storage Server V2
+# Content Storage Server
 
 A high-performance, enterprise-grade content storage server built with Go, featuring BadgerDB storage, emergency shutdown capabilities, and comprehensive management tools.
 
@@ -23,7 +23,7 @@ A high-performance, enterprise-grade content storage server built with Go, featu
 ```bash
 # Clone and build
 git clone <repository-url>
-cd content-host/V2
+cd content-host
 go mod download
 go build cmd/server
 
