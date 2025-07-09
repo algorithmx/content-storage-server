@@ -1,0 +1,40 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Environment (exclude example files but keep main .env)
+.env.example
+.env.*
+!.env
+
+# Build artifacts
+server
+*.exe
+
+# Data directories
+data/
+logs/
+backups/
+certs/
+
+# Documentation
+README.md
+
+# Tests
+*_test.go
+test/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
