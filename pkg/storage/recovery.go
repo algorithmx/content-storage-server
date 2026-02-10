@@ -94,9 +94,9 @@ func (s *BadgerStorage) RecoverFromEmergencyShutdown() error {
 			if _, err := os.Stat(queueFile); err == nil {
 				// Perform recovery
 				recoverErr := s.performEmergencyRecovery(pendingFile, queueFile, metadataFile, latestTimestamp)
-				if recoverErr!= nil {
-					fmt.Println("⚠️ Recovery finished with error %s", recoverErr.Error())
-				} else{
+				if recoverErr != nil {
+					fmt.Printf("⚠️ Recovery finished with error %s\n", recoverErr.Error())
+				} else {
 					fmt.Println("⚠️ Recovery finished successfully")
 				}
 				return recoverErr
