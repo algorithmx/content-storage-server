@@ -105,6 +105,6 @@ func SetupMiddleware(e *echo.Echo, cfg *config.Config, appLogger *zap.Logger) {
 
 	// API key authentication middleware (if enabled)
 	if cfg.EnableAuth {
-		e.Use(EchoAPIKeyMiddleware(cfg.APIKey, appLogger))
+		e.Use(EchoAPIKeyMiddleware(cfg, appLogger))
 	}
 }

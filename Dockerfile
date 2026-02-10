@@ -1,18 +1,16 @@
 # Build stage
 FROM golang:1.24-alpine AS builder
 
-# Use system proxy settings (both uppercase and lowercase for compatibility)
-ENV HTTP_PROXY=http://192.168.1.11:10078
-ENV HTTPS_PROXY=http://192.168.1.11:10078
-ENV NO_PROXY=FE80::/64,127.0.0.1,::1,FD00::/8,192.168.0.0/16,10.0.0.0/8,localhost
-ENV http_proxy=http://192.168.1.11:10078
-ENV https_proxy=http://192.168.1.11:10078
-ENV no_proxy=FE80::/64,127.0.0.1,::1,FD00::/8,192.168.0.0/16,10.0.0.0/8,localhost
+# Proxy settings can be passed at build time using --build-arg if needed
+# ARG HTTP_PROXY
+# ARG HTTPS_PROXY
+# ARG NO_PROXY
+# ENV http_proxy=${HTTP_PROXY} https_proxy=${HTTPS_PROXY} no_proxy=${NO_PROXY}
 
 WORKDIR /app
 
 # Install build dependencies
-RUN echo "proxy $HTTP_PROXY" >> /etc/apk/repositories.conf && apk add --no-cache git
+RUN apk add --no-cache git ca-certificates
 
 # Copy go mod files
 COPY go.mod go.sum ./
@@ -27,19 +25,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o server ./cmd/serv
 # Runtime stage
 FROM alpine:latest
 
-# Use proxy settings for runtime stage
-ENV HTTP_PROXY=http://192.168.1.11:10078
-ENV HTTPS_PROXY=http://192.168.1.11:10078
-ENV NO_PROXY=FE80::/64,127.0.0.1,::1,FD00::/8,192.168.0.0/16,10.0.0.0/8,localhost
-ENV http_proxy=http://192.168.1.11:10078
-ENV https_proxy=http://192.168.1.11:10078
-ENV no_proxy=FE80::/64,127.0.0.1,::1,FD00::/8,192.168.0.0/16,10.0.0.0/8,localhost
-
-# Install ca-certificates for HTTPS
-RUN if [ -n "$HTTP_PROXY" ]; then \
-        echo "proxy $HTTP_PROXY" >> /etc/apk/repositories.conf; \
-    fi && \
-    apk --no-cache add ca-certificates
+# Install ca-certificates for HTTPS (proxy settings can be passed at build time)
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 

@@ -84,6 +84,9 @@ func NewBadgerStorage(opts BadgerOptions) (*BadgerStorage, error) {
 	if opts.WriteQueueBatchTimeout == 0 {
 		opts.WriteQueueBatchTimeout = 10 * time.Millisecond // Default batch timeout
 	}
+	if opts.WriteQueueMaxMultiplier == 0 {
+		opts.WriteQueueMaxMultiplier = 10 // Default maximum multiplier: 10x
+	}
 
 	// Create data directory if it doesn't exist
 	dataDir := filepath.Clean(opts.DataDir)
@@ -108,6 +111,11 @@ func NewBadgerStorage(opts BadgerOptions) (*BadgerStorage, error) {
 
 	// Initialize access manager for separate access count tracking
 	storage.accessManager = NewAccessManager()
+
+	// Start automatic access tracker cleanup to prevent memory leaks
+	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	storage.accessManager.cleanupCancel = cleanupCancel
+	go storage.accessManager.StartCleanupLoop(cleanupCtx, storage, 30*time.Minute, nil)
 
 	// Initialize garbage collector with enhanced features
 	storage.gc = NewGarbageCollector(db)
@@ -197,6 +205,7 @@ func (s *BadgerStorage) initializeQueuedWrites(opts BadgerOptions) error {
 	}
 
 	s.queuedBatch = NewQueuedWriteBatch(s.db, queueOpts)
+	s.queuedBatch.SetMaxMultiplier(opts.WriteQueueMaxMultiplier)
 	return nil
 }
 

@@ -60,6 +60,7 @@ type BadgerOptions struct {
 	WriteQueueSize         int           // Size of the write queue buffer
 	WriteQueueBatchSize    int           // Maximum items to batch together from queue
 	WriteQueueBatchTimeout time.Duration // Maximum time to wait before flushing a partial batch
+	WriteQueueMaxMultiplier int          // Maximum multiplier of initial queue size (default: 10x)
 
 	// Cache configuration
 	CacheTTL time.Duration // Cache TTL for read operations

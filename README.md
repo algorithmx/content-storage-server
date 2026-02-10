@@ -2,6 +2,8 @@
 
 A high-performance, enterprise-grade content storage server built with Go, featuring BadgerDB storage, emergency shutdown capabilities, and comprehensive management tools.
 
+**[📖 On-boarding Guide](ONBOARDING.md)** - New developers should start here!
+
 ## 🚀 Key Features
 
 - **Asynchronous REST API** - HTTP 202 responses with status verification endpoints
@@ -22,19 +24,20 @@ A high-performance, enterprise-grade content storage server built with Go, featu
 
 ```bash
 # Clone and build
-git clone https://github.com/algorithmx/content-storage-server
-cd content-host
+git clone <repository-url>
+cd content-storage-server
 go mod download
-go build cmd/server
+go build -o server ./cmd/server
 
 # Run the server
 ./server
 ```
 
 ### Access Points
-- **Management Dashboard**: http://localhost:8081/
+- **Management Dashboard**: http://localhost:8081/ (or http://localhost:8081/static/index.html)
 - **API Documentation**: http://localhost:8081/swagger/index.html
 - **Health Check**: http://localhost:8081/health
+- **Detailed Health**: http://localhost:8081/health/detailed
 
 ### Basic Usage
 
@@ -262,11 +265,19 @@ kill -USR1 <pid>
 4. Ensure all tests pass (`go test ./...`)
 5. Submit a pull request
 
-## 📞 Support
+## 📞 Support & Resources
 
+### Documentation
+- **[On-boarding Guide](ONBOARDING.md)** - Comprehensive developer onboarding
+- **[Storage Module](pkg/storage/README.md)** - Storage layer documentation
+- **[Handlers](internal/handlers/README.md)** - API handler documentation
+- **[Management Interface](static/README.md)** - Dashboard documentation
+
+### Endpoints
 - **API Documentation**: http://localhost:8081/swagger/index.html
 - **Management Interface**: http://localhost:8081/
 - **Health Monitoring**: http://localhost:8081/health/detailed
+- **System Metrics**: http://localhost:8081/api/v1/metrics
 
 ## 📄 License
 

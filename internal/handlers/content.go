@@ -202,8 +202,8 @@ func (h *ContentHandler) GetContent(c echo.Context) error {
 		h.logError("Failed to retrieve content", zap.String("id", id), zap.Error(err))
 		return c.JSON(http.StatusInternalServerError, models.StorageResponse{
 			Success: false,
-			Message: "Failed to retrieve content",
-			Data:    map[string]string{"error": err.Error()},
+			Message: sanitizeErrorWithPrefix(err, "Failed to retrieve content"),
+			Data:    map[string]string{"error": sanitizeError(err)},
 		})
 	}
 

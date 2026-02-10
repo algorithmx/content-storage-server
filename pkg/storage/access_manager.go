@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"content-storage-server/pkg/models"
 	"sync"
 	"time"
@@ -18,6 +19,9 @@ type AccessManager struct {
 	// Cleanup tracking for memory leak prevention
 	lastCleanupTime time.Time
 	cleanupInterval time.Duration
+
+	// Cleanup cancellation for automatic cleanup loop
+	cleanupCancel context.CancelFunc
 }
 
 // NewAccessManager creates a new access manager
@@ -194,4 +198,27 @@ func (am *AccessManager) SetCleanupInterval(interval time.Duration) {
 	am.mutex.Lock()
 	defer am.mutex.Unlock()
 	am.cleanupInterval = interval
+}
+
+// StartCleanupLoop starts automatic periodic cleanup of expired access trackers
+// This prevents memory leaks by cleaning up stale access tracking data
+func (am *AccessManager) StartCleanupLoop(ctx context.Context, storage Storage, interval time.Duration, logger interface{ Infof(string, ...interface{}) }) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// Get all existing content IDs from storage (already returns a map)
+			if contentIDs, err := storage.GetAllContentIDs(); err == nil {
+				// Clean up expired trackers
+				removed := am.CleanupExpiredTrackers(contentIDs)
+				if removed > 0 && logger != nil {
+					logger.Infof("Cleaned up %d expired access trackers", removed)
+				}
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }

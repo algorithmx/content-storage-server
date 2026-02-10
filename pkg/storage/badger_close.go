@@ -27,6 +27,11 @@ func (s *BadgerStorage) CloseWithTimeout(timeout time.Duration) error {
 	// Step 1: Brief status report on pending item queue and write queue at initial step
 	s.reportInitialShutdownStatus()
 
+	// Stop automatic access tracker cleanup loop
+	if s.accessManager != nil && s.accessManager.cleanupCancel != nil {
+		s.accessManager.cleanupCancel()
+	}
+
 	// Execute sequential shutdown of all components (no more concurrent shutdown)
 	errors := s.executeSequentialShutdown(ctx)
 
@@ -512,29 +517,33 @@ func (s *BadgerStorage) EmergencyShutdown() error {
 
 	// Serialize volatile queue state (no console output for speed)
 	if s.queuedBatch != nil {
+		var pendingChecksum, queueChecksum string
+
 		// Serialize pending items
-		if pendingData, err := s.queuedBatch.SerializePendingTasks(); err == nil {
+		if pendingData, checksum, err := s.queuedBatch.SerializePendingTasks(); err == nil {
+			pendingChecksum = checksum
 			pendingFile := filepath.Join(recoveryDir, fmt.Sprintf("pending-items-%s.json", timestamp))
 			os.WriteFile(pendingFile, pendingData, 0644) // Ignore error for speed
 		}
 
 		// Serialize write queue
-		if queueData, err := s.queuedBatch.SerializeWriteQueue(); err == nil {
+		if queueData, checksum, err := s.queuedBatch.SerializeWriteQueue(); err == nil {
+			queueChecksum = checksum
 			queueFile := filepath.Join(recoveryDir, fmt.Sprintf("write-queue-%s.json", timestamp))
 			os.WriteFile(queueFile, queueData, 0644) // Ignore error for speed
 		}
-	}
 
-	// Step 3: Save recovery metadata (ignore error for speed)
-	s.saveEmergencyRecoveryMetadata(recoveryDir, timestamp, startTime)
+		// Save recovery metadata with checksums
+		s.saveEmergencyRecoveryMetadata(recoveryDir, timestamp, startTime, pendingChecksum, queueChecksum)
+	}
 
 	return nil
 }
 
 // saveEmergencyRecoveryMetadata saves recovery metadata for emergency shutdown (ultra-optimized)
-func (s *BadgerStorage) saveEmergencyRecoveryMetadata(recoveryDir, timestamp string, startTime time.Time) error {
+func (s *BadgerStorage) saveEmergencyRecoveryMetadata(recoveryDir, timestamp string, startTime time.Time, pendingChecksum, queueChecksum string) error {
 	// Use pre-prepared metadata template for faster processing
-	metadata := make(map[string]interface{}, 5) // Pre-size for known fields
+	metadata := make(map[string]interface{}, 7) // Pre-size for known fields including checksums
 
 	// Copy pre-prepared template
 	if s.emergencyMetadataTemplate != nil {
@@ -548,6 +557,10 @@ func (s *BadgerStorage) saveEmergencyRecoveryMetadata(recoveryDir, timestamp str
 	metadata["shutdown_time"] = startTime.Format(time.RFC3339)
 	metadata["pending_items"] = "pending-items-" + timestamp + ".json"
 	metadata["write_queue"] = "write-queue-" + timestamp + ".json"
+
+	// Add checksums for data integrity verification
+	metadata["pending_checksum"] = pendingChecksum
+	metadata["queue_checksum"] = queueChecksum
 
 	// Use pre-allocated buffer for JSON marshaling
 	s.emergencyMetadataBuffer = s.emergencyMetadataBuffer[:0] // Reset buffer

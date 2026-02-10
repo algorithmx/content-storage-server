@@ -111,4 +111,7 @@ type Storage interface {
 	// FlushQueue triggers an explicit flush of the write queue, pausing the worker temporarily.
 	FlushQueue() error
 
+	// GetAllContentIDs returns a map of all existing content IDs for cleanup purposes
+	GetAllContentIDs() (map[string]bool, error)
+
 }

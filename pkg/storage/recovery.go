@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -147,15 +149,40 @@ func (s *BadgerStorage) RecoverFromEmergencyShutdown() error {
 //
 // Returns error if critical recovery operations fail.
 func (s *BadgerStorage) performEmergencyRecovery(pendingFile, queueFile, metadataFile, timestamp string) error {
-	// Read and restore pending items
+	// Read metadata to get checksums
+	metadataData, err := os.ReadFile(metadataFile)
+	if err != nil {
+		return fmt.Errorf("failed to read metadata file: %w", err)
+	}
+
+	var metadata map[string]interface{}
+	if err := json.Unmarshal(metadataData, &metadata); err != nil {
+		return fmt.Errorf("failed to unmarshal metadata: %w", err)
+	}
+
+	// Extract checksums from metadata
+	pendingChecksum, _ := metadata["pending_checksum"].(string)
+	queueChecksum, _ := metadata["queue_checksum"].(string)
+
+	// Read and restore pending items with checksum verification
 	if pendingData, err := os.ReadFile(pendingFile); err == nil {
+		if pendingChecksum != "" {
+			if err := verifyChecksum(pendingData, pendingChecksum); err != nil {
+				return fmt.Errorf("pending items checksum verification failed: %w", err)
+			}
+		}
 		if err := s.restorePendingItems(pendingData); err != nil {
 			return fmt.Errorf("failed to restore pending items: %w", err)
 		}
 	}
 
-	// Read and restore write queue
+	// Read and restore write queue with checksum verification
 	if queueData, err := os.ReadFile(queueFile); err == nil {
+		if queueChecksum != "" {
+			if err := verifyChecksum(queueData, queueChecksum); err != nil {
+				return fmt.Errorf("write queue checksum verification failed: %w", err)
+			}
+		}
 		if err := s.restoreWriteQueue(queueData); err != nil {
 			return fmt.Errorf("failed to restore write queue: %w", err)
 		}
@@ -269,4 +296,20 @@ func (s *BadgerStorage) archiveRecoveredFiles(pendingFile, queueFile, metadataFi
 		newPath := filepath.Join(processedDir, "recovery-metadata-"+timestamp+".json")
 		os.Rename(metadataFile, newPath)
 	}
+}
+
+// verifyChecksum verifies that data matches the expected SHA256 checksum
+func verifyChecksum(data []byte, expectedChecksum string) error {
+	if expectedChecksum == "" {
+		return nil // No checksum to verify
+	}
+
+	hash := sha256.Sum256(data)
+	actualChecksum := hex.EncodeToString(hash[:])
+
+	if actualChecksum != expectedChecksum {
+		return fmt.Errorf("checksum mismatch: expected %s, got %s", expectedChecksum, actualChecksum)
+	}
+
+	return nil
 }

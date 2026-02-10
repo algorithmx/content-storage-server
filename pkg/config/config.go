@@ -15,10 +15,12 @@ type Config struct {
 	// =============================================================================
 	// GROUP 1: HTTP SERVER SETTINGS
 	// =============================================================================
-	Port         string        // HTTP server port
-	Host         string        // HTTP server host/bind address
-	ReadTimeout  time.Duration // HTTP read timeout
-	WriteTimeout time.Duration // HTTP write timeout
+	Port             string        // HTTP server port
+	Host             string        // HTTP server host/bind address
+	ReadTimeout      time.Duration // HTTP read timeout
+	WriteTimeout     time.Duration // HTTP write timeout
+	MaxConnsPerHost  int           // Maximum concurrent connections per IP (default: 100)
+	AllowQueryParamAuth bool       // Allow API key via query parameter (default: false - production unsafe)
 
 	// =============================================================================
 	// GROUP 1.1: TLS/HTTPS SETTINGS
@@ -59,6 +61,7 @@ type Config struct {
 	WriteQueueSize         int           // Size of the write queue buffer
 	WriteQueueBatchSize    int           // Number of writes to batch together
 	WriteQueueBatchTimeout time.Duration // Maximum time to wait before flushing a batch
+	WriteQueueMaxMultiplier int          // Maximum multiplier of initial queue size (default: 10x)
 
 	// =============================================================================
 	// GROUP 5: AUTHENTICATION & AUTHORIZATION SETTINGS
@@ -136,10 +139,12 @@ func Load() *Config {
 
 	config := &Config{
 		// Server settings
-		Port:         env("PORT", "8081"),
-		Host:         env("HOST", "0.0.0.0"),
-		ReadTimeout:  envDuration("READ_TIMEOUT", 30*time.Second),
-		WriteTimeout: envDuration("WRITE_TIMEOUT", 30*time.Second),
+		Port:                 env("PORT", "8081"),
+		Host:                 env("HOST", "0.0.0.0"),
+		ReadTimeout:          envDuration("READ_TIMEOUT", 30*time.Second),
+		WriteTimeout:         envDuration("WRITE_TIMEOUT", 30*time.Second),
+		MaxConnsPerHost:      envInt("MAX_CONNS_PER_HOST", 100),
+		AllowQueryParamAuth:  envBool("ALLOW_QUERY_PARAM_AUTH", false),
 
 		// TLS/HTTPS settings
 		EnableTLS:       envBool("ENABLE_TLS", false),
@@ -172,6 +177,7 @@ func Load() *Config {
 		WriteQueueSize:         envInt("WRITE_QUEUE_SIZE", 10000),                         // Default queue size for high throughput
 		WriteQueueBatchSize:    envInt("WRITE_QUEUE_BATCH_SIZE", 100),                    // Default batch size
 		WriteQueueBatchTimeout: envDuration("WRITE_QUEUE_BATCH_TIMEOUT", 5*time.Millisecond), // Optimized batch timeout for better throughput
+		WriteQueueMaxMultiplier: envInt("WRITE_QUEUE_MAX_MULTIPLIER", 10),                 // Max queue size = initial * multiplier
 
 		// Validation settings
 		MaxIDLength:        envInt("MAX_ID_LENGTH", 255),        // Maximum ID length

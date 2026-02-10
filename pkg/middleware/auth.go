@@ -4,13 +4,15 @@ import (
 	"net/http"
 	"strings"
 
+	"content-storage-server/pkg/config"
+
 	"github.com/labstack/echo/v4"
 	"go.uber.org/zap"
 )
 
 // EchoAPIKeyMiddleware provides API key authentication for Echo
 // It skips authentication for health checks, heartbeat, and profiler endpoints
-func EchoAPIKeyMiddleware(expectedAPIKey string, appLogger *zap.Logger) echo.MiddlewareFunc {
+func EchoAPIKeyMiddleware(cfg *config.Config, appLogger *zap.Logger) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
 			// Skip authentication for health checks, heartbeat, profiler endpoints, and static files
@@ -23,11 +25,12 @@ func EchoAPIKeyMiddleware(expectedAPIKey string, appLogger *zap.Logger) echo.Mid
 			}
 
 			apiKey := c.Request().Header.Get("X-API-Key")
-			if apiKey == "" {
+			if apiKey == "" && cfg.AllowQueryParamAuth {
+				// Only allow query parameter auth if explicitly enabled (development only)
 				apiKey = c.QueryParam("api_key")
 			}
 
-			if apiKey != expectedAPIKey {
+			if apiKey != cfg.APIKey {
 				appLogger.Warn("Unauthorized API access attempt",
 					zap.String("ip", c.RealIP()),
 					zap.String("path", path),

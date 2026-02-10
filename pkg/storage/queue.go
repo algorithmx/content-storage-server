@@ -2,6 +2,8 @@ package storage
 
 import (
 	"content-storage-server/pkg/models"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,6 +42,9 @@ type QueuedWriteBatch struct {
 	// Synchronization for queue capacity operations
 	capacityMutex sync.Mutex // Protects queue capacity doubling operations
 
+	// Queue growth limits to prevent unbounded memory growth
+	initialQueueSize int  // Initial queue size for calculating maximum limit
+	maxMultiplier    int  // Maximum multiplier of initial queue size (default: 10x)
 }
 
 // QueuedWriteBatchOptions contains configuration for the queued write system
@@ -92,9 +97,11 @@ func NewQueuedWriteBatch(db *badger.DB, opts QueuedWriteBatchOptions) *QueuedWri
 			TotalErrors:     0,
 			processingCount: 0,
 		},
-		db:            db,
-		pendingItems:  NewCountedSyncMap(),
-		notifications: NewUnifiedNotificationSystem(),
+		db:               db,
+		pendingItems:     NewCountedSyncMap(),
+		notifications:    NewUnifiedNotificationSystem(),
+		initialQueueSize: opts.QueueSize,
+		maxMultiplier:    10, // Default maximum multiplier: 10x initial size
 	}
 
 	// Set default error handler if none provided
@@ -349,9 +356,19 @@ func (qwb *QueuedWriteBatch) DoubleQueueCapacity() error {
 		return fmt.Errorf("cannot double queue capacity: system is shutting down")
 	}
 
-	// Calculate new capacity (double the current)
+	// Check against maximum limit to prevent unbounded memory growth
 	oldCapacity := qwb.maxQueueSize
+	maxAllowed := qwb.initialQueueSize * qwb.maxMultiplier
+
+	if oldCapacity >= maxAllowed {
+		return fmt.Errorf("queue at maximum capacity (%d), cannot double further", maxAllowed)
+	}
+
+	// Calculate new capacity (double the current, but don't exceed max)
 	newCapacity := oldCapacity * 2
+	if newCapacity > maxAllowed {
+		newCapacity = maxAllowed
+	}
 
 	// Create new channel with doubled capacity
 	newQueue := make(chan *WriteTask, newCapacity)
@@ -766,7 +783,8 @@ func (qwb *QueuedWriteBatch) forceProcessStuckTasks() {
 }
 
 // SerializePendingTasks extracts all pending tasks and returns them as JSON for emergency recovery
-func (qwb *QueuedWriteBatch) SerializePendingTasks() ([]byte, error) {
+// Returns the data, SHA256 checksum, and any error
+func (qwb *QueuedWriteBatch) SerializePendingTasks() ([]byte, string, error) {
 	var tasks []*WriteTask
 
 	// Extract all pending tasks
@@ -791,11 +809,19 @@ func (qwb *QueuedWriteBatch) SerializePendingTasks() ([]byte, error) {
 		}
 	}
 
-	return json.Marshal(serializableTasks)
+	data, err := json.Marshal(serializableTasks)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Calculate SHA256 checksum for data integrity verification
+	checksum := calculateChecksum(data)
+	return data, checksum, nil
 }
 
 // SerializeWriteQueue drains the write queue and returns tasks as JSON for emergency recovery
-func (qwb *QueuedWriteBatch) SerializeWriteQueue() ([]byte, error) {
+// Returns the data, SHA256 checksum, and any error
+func (qwb *QueuedWriteBatch) SerializeWriteQueue() ([]byte, string, error) {
 	var tasks []*WriteTask
 
 	// Drain all tasks from write queue non-blocking
@@ -824,7 +850,14 @@ done:
 		}
 	}
 
-	return json.Marshal(serializableTasks)
+	data, err := json.Marshal(serializableTasks)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Calculate SHA256 checksum for data integrity verification
+	checksum := calculateChecksum(data)
+	return data, checksum, nil
 }
 
 // GetHealthStatus returns the health status of the queue system
@@ -864,4 +897,18 @@ func (qwb *QueuedWriteBatch) getMaxQueueSizeProtected() int {
 	qwb.capacityMutex.Lock()
 	defer qwb.capacityMutex.Unlock()
 	return qwb.maxQueueSize
+}
+
+// calculateChecksum calculates SHA256 checksum of data for integrity verification
+func calculateChecksum(data []byte) string {
+	hash := sha256.Sum256(data)
+	return hex.EncodeToString(hash[:])
+}
+
+// SetMaxMultiplier sets the maximum queue capacity multiplier
+// The maximum queue size will be initialQueueSize * maxMultiplier
+func (qwb *QueuedWriteBatch) SetMaxMultiplier(multiplier int) {
+	qwb.capacityMutex.Lock()
+	defer qwb.capacityMutex.Unlock()
+	qwb.maxMultiplier = multiplier
 }
