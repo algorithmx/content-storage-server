@@ -171,6 +171,9 @@ func main() {
 	// Display current configuration for operational visibility
 	cfg.DisplayConfiguration()
 
+	// Validate configuration and print warnings/errors
+	cfg.PrintValidationReport()
+
 	// Log comprehensive server configuration and system status
 	logComprehensiveStartupInfo(appLogger, cfg)
 
@@ -594,12 +597,14 @@ func performGracefulServerShutdown(server *http.Server, cfg *config.Config, appL
 // performEmergencyServerShutdown performs an emergency server shutdown
 func performEmergencyServerShutdown(server *http.Server, cfg *config.Config, appLogger *zap.Logger, storage storage.Storage) {
 	startTime := time.Now()
+	hasErrors := false
 
 	// Step 1: Perform emergency storage shutdown first (data preservation)
 	if storageInstance, ok := storage.(interface{ EmergencyShutdown() error }); ok {
 		if err := storageInstance.EmergencyShutdown(); err != nil {
 			appLogger.Error("Emergency storage shutdown failed", zap.Error(err))
 			fmt.Printf("Emergency storage shutdown - FAILED (%v)\n", err)
+			hasErrors = true
 		}
 	}
 
@@ -608,15 +613,21 @@ func performEmergencyServerShutdown(server *http.Server, cfg *config.Config, app
 		elapsed := time.Since(startTime)
 		appLogger.Error("HTTP server emergency shutdown failed", zap.Error(err), zap.Duration("duration", elapsed))
 		fmt.Printf("HTTP server emergency shutdown - FAILED (%v) [%v]\n", err, elapsed)
+		hasErrors = true
 	} else {
 		elapsed := time.Since(startTime)
 		appLogger.Info("HTTP server emergency shutdown completed", zap.Duration("duration", elapsed))
 		fmt.Printf("HTTP server emergency shutdown - SUCCESS [%v]\n", elapsed)
 	}
 
-	// Step 3: Exit immediately (abandon server)
-	fmt.Println("🚨 EMERGENCY SHUTDOWN: Server abandoned")
-	os.Exit(1)
+	// Step 3: Exit immediately with appropriate code
+	// Exit 0 on success, 1 on failure
+	if hasErrors {
+		fmt.Println("🚨 EMERGENCY SHUTDOWN: Server abandoned with errors")
+		os.Exit(1)
+	}
+	fmt.Println("🚨 EMERGENCY SHUTDOWN: Server abandoned successfully")
+	os.Exit(0)
 }
 
 // logComprehensiveStartupInfo logs detailed server configuration and system status on startup.
