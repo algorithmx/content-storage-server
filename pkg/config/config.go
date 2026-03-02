@@ -187,8 +187,8 @@ func Load() *Config {
 
 		// Security settings
 		APIKey:         env("API_KEY", ""),
-		EnableAuth:     envBool("ENABLE_AUTH", false),
-		AllowedOrigins: envStringSlice("ALLOWED_ORIGINS", []string{"*"}),
+		EnableAuth:     envBool("ENABLE_AUTH", true), // Changed: auth enabled by default for security
+		AllowedOrigins: envStringSlice("ALLOWED_ORIGINS", []string{}), // Changed: empty by default (must be explicitly set)
 		AllowedIPs:     envStringSlice("ALLOWED_IPS", []string{}), // Empty means no IP restrictions
 
 		// Performance settings
@@ -411,4 +411,93 @@ func envFloat64(key string, defaultValue float64) float64 {
 		}
 	}
 	return defaultValue
+}
+
+// Validate checks the configuration for security issues and validates values
+// Returns a list of warnings and errors found
+func (cfg *Config) Validate() (warnings []string, errors []string) {
+	// Security warnings
+	if !cfg.EnableAuth {
+		warnings = append(warnings, "Authentication is disabled (ENABLE_AUTH=false). This is insecure for production.")
+	}
+
+	if cfg.APIKey == "" && cfg.EnableAuth {
+		errors = append(errors, "Authentication is enabled but API_KEY is empty. Set a secure API key.")
+	} else if cfg.APIKey != "" && len(cfg.APIKey) < 32 {
+		warnings = append(warnings, fmt.Sprintf("API key is only %d characters. Recommend at least 32 characters for security.", len(cfg.APIKey)))
+	}
+
+	if len(cfg.AllowedOrigins) == 0 {
+		// This is now the secure default, but we should inform user
+		warnings = append(warnings, "CORS AllowedOrigins is empty. Set ALLOWED_ORIGINS to your trusted domains.")
+	} else {
+		for _, origin := range cfg.AllowedOrigins {
+			if origin == "*" {
+				warnings = append(warnings, "CORS allows all origins (*). This enables CSRF attacks. Restrict to trusted domains.")
+			}
+		}
+	}
+
+	if cfg.AllowQueryParamAuth {
+		warnings = append(warnings, "Query parameter authentication is enabled. API keys may be logged in server logs. Use only in development.")
+	}
+
+	if !cfg.EnableTLS && cfg.EnableAuth {
+		warnings = append(warnings, "Authentication enabled without TLS. API keys are transmitted in plaintext. Enable TLS for production.")
+	}
+
+	// Timeout validation
+	if cfg.ReadTimeout <= 0 {
+		errors = append(errors, fmt.Sprintf("ReadTimeout must be positive, got %v", cfg.ReadTimeout))
+	}
+	if cfg.WriteTimeout <= 0 {
+		errors = append(errors, fmt.Sprintf("WriteTimeout must be positive, got %v", cfg.WriteTimeout))
+	}
+	if cfg.RequestTimeout <= 0 {
+		errors = append(errors, fmt.Sprintf("RequestTimeout must be positive, got %v", cfg.RequestTimeout))
+	}
+	if cfg.ShutdownTimeout <= 0 {
+		errors = append(errors, fmt.Sprintf("ShutdownTimeout must be positive, got %v", cfg.ShutdownTimeout))
+	}
+
+	// Size validation
+	if cfg.MaxContentSize <= 0 {
+		errors = append(errors, fmt.Sprintf("MaxContentSize must be positive, got %d", cfg.MaxContentSize))
+	}
+	if cfg.CacheSize < 0 {
+		errors = append(errors, fmt.Sprintf("CacheSize cannot be negative, got %d", cfg.CacheSize))
+	}
+
+	// Rate limiting validation
+	if cfg.ThrottleLimit <= 0 {
+		errors = append(errors, fmt.Sprintf("ThrottleLimit must be positive, got %d", cfg.ThrottleLimit))
+	}
+	if cfg.EchoRateLimit <= 0 {
+		errors = append(errors, fmt.Sprintf("EchoRateLimit must be positive, got %f", cfg.EchoRateLimit))
+	}
+
+	return warnings, errors
+}
+
+// PrintValidationReport prints the validation results to stdout
+func (cfg *Config) PrintValidationReport() {
+	warnings, errors := cfg.Validate()
+
+	if len(warnings) > 0 {
+		fmt.Printf("\n⚠️  Configuration Warnings (%d):\n", len(warnings))
+		for _, w := range warnings {
+			fmt.Printf("   - %s\n", w)
+		}
+	}
+
+	if len(errors) > 0 {
+		fmt.Printf("\n❌ Configuration Errors (%d):\n", len(errors))
+		for _, e := range errors {
+			fmt.Printf("   - %s\n", e)
+		}
+	}
+
+	if len(warnings) == 0 && len(errors) == 0 {
+		fmt.Printf("\n✅ Configuration validated successfully\n")
+	}
 }

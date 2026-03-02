@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -30,7 +31,10 @@ func EchoAPIKeyMiddleware(cfg *config.Config, appLogger *zap.Logger) echo.Middle
 				apiKey = c.QueryParam("api_key")
 			}
 
-			if apiKey != cfg.APIKey {
+			// Use constant-time comparison to prevent timing attacks
+			// Both strings must be non-empty for secure comparison
+			if len(apiKey) == 0 || len(cfg.APIKey) == 0 ||
+				subtle.ConstantTimeCompare([]byte(apiKey), []byte(cfg.APIKey)) != 1 {
 				appLogger.Warn("Unauthorized API access attempt",
 					zap.String("ip", c.RealIP()),
 					zap.String("path", path),
