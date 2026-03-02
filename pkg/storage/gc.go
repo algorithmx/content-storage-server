@@ -196,6 +196,10 @@ func (gc *GarbageCollector) gcLoop() {
 	ticker := time.NewTicker(gc.interval)
 	defer ticker.Stop()
 
+	// Exponential backoff for error recovery
+	consecutiveErrors := 0
+	maxBackoff := 5 * time.Minute
+
 	for {
 		select {
 		case <-ticker.C:
@@ -203,9 +207,24 @@ func (gc *GarbageCollector) gcLoop() {
 			if gc.shouldRunGC() {
 				err := gc.RunGC()
 				if err != nil && err != badger.ErrNoRewrite {
-					// Log error but continue - in production use proper logging
-					fmt.Printf("GC error: %v\n", err)
-					return
+					consecutiveErrors++
+					// Log error but continue with exponential backoff
+					fmt.Printf("GC error (attempt %d): %v\n", consecutiveErrors, err)
+
+					// Apply exponential backoff by adjusting ticker
+					if consecutiveErrors > 0 {
+						backoff := time.Duration(consecutiveErrors) * gc.interval
+						if backoff > maxBackoff {
+							backoff = maxBackoff
+						}
+						ticker.Reset(backoff)
+					}
+				} else {
+					// Reset backoff on success
+					if consecutiveErrors > 0 {
+						consecutiveErrors = 0
+						ticker.Reset(gc.interval)
+					}
 				}
 			}
 		case <-gc.stopChan:

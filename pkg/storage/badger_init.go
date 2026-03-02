@@ -94,9 +94,34 @@ func NewBadgerStorage(opts BadgerOptions) (*BadgerStorage, error) {
 	// Get optimized BadgerDB options
 	badgerOpts := getOptimizedBadgerOptions(dataDir, opts)
 
-	db, err := badger.Open(badgerOpts)
+	// Open database with retry logic for transient filesystem issues
+	var db *badger.DB
+	var err error
+	maxRetries := 5
+	baseDelay := 100 * time.Millisecond
+	maxDelay := 5 * time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		db, err = badger.Open(badgerOpts)
+		if err == nil {
+			break // Success
+		}
+
+		// Calculate exponential backoff delay
+		delay := time.Duration(attempt) * baseDelay
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+
+		fmt.Printf("Database open attempt %d/%d failed: %v, retrying in %v...\n", attempt, maxRetries, err, delay)
+
+		if attempt < maxRetries {
+			time.Sleep(delay)
+		}
+	}
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to open BadgerDB: %w", err)
+		return nil, fmt.Errorf("failed to open BadgerDB after %d attempts: %w", maxRetries, err)
 	}
 
 	// Create background operation context for proper shutdown tracking

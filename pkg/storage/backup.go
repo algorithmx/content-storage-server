@@ -143,6 +143,10 @@ func (bm *BackupManager) backupLoop() {
 	ticker := time.NewTicker(bm.interval)
 	defer ticker.Stop()
 
+	// Exponential backoff for error recovery
+	consecutiveErrors := 0
+	maxBackoff := 30 * time.Minute
+
 	for {
 		select {
 		case <-bm.ctx.Done():
@@ -151,9 +155,24 @@ func (bm *BackupManager) backupLoop() {
 			return
 		case <-ticker.C:
 			if err := bm.doBackup(); err != nil {
-				// Log error but continue running
-				fmt.Printf("Backup failed: %v\n", err)
-				return
+				consecutiveErrors++
+				// Log error but continue with exponential backoff
+				fmt.Printf("Backup failed (attempt %d): %v\n", consecutiveErrors, err)
+
+				// Apply exponential backoff by adjusting ticker
+				if consecutiveErrors > 0 {
+					backoff := time.Duration(consecutiveErrors) * bm.interval
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+					ticker.Reset(backoff)
+				}
+			} else {
+				// Reset backoff on success
+				if consecutiveErrors > 0 {
+					consecutiveErrors = 0
+					ticker.Reset(bm.interval)
+				}
 			}
 		}
 	}
