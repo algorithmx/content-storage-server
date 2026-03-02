@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,6 +21,61 @@ import (
 	"syscall"
 	"time"
 )
+
+// WorkloadPattern defines operation mix ratios
+type WorkloadPattern string
+
+const (
+	WorkloadWriteOnly  WorkloadPattern = "write-only"  // 100% POST
+	WorkloadReadOnly   WorkloadPattern = "read-only"   // 100% GET
+	WorkloadBalanced   WorkloadPattern = "balanced"    // 50% read, 50% write
+	WorkloadReadHeavy  WorkloadPattern = "read-heavy"  // 80% read, 20% write
+	WorkloadWriteHeavy WorkloadPattern = "write-heavy" // 20% read, 80% write
+	WorkloadCRUD       WorkloadPattern = "crud"        // POST 40%, GET 40%, DELETE 20%
+)
+
+// ContentSizeCategory defines content size ranges
+type ContentSizeCategory string
+
+const (
+	SizeTiny   ContentSizeCategory = "tiny"   // 10-100 bytes
+	SizeSmall  ContentSizeCategory = "small"  // 100B - 1KB
+	SizeMedium ContentSizeCategory = "medium" // 1KB - 100KB
+	SizeLarge  ContentSizeCategory = "large"  // 100KB - 1MB
+)
+
+// SizeDistribution weights for content generation
+type SizeDistribution struct {
+	Tiny, Small, Medium, Large float64
+}
+
+// OperationWeights defines the probability weights for each operation type
+type OperationWeights struct {
+	Post   float64
+	Get    float64
+	List   float64
+	Delete float64
+}
+
+// GetWeights returns operation weights for a workload pattern
+func (w WorkloadPattern) GetWeights() OperationWeights {
+	switch w {
+	case WorkloadWriteOnly:
+		return OperationWeights{Post: 1.0, Get: 0, List: 0, Delete: 0}
+	case WorkloadReadOnly:
+		return OperationWeights{Post: 0, Get: 0.8, List: 0.2, Delete: 0}
+	case WorkloadBalanced:
+		return OperationWeights{Post: 0.5, Get: 0.4, List: 0.05, Delete: 0.05}
+	case WorkloadReadHeavy:
+		return OperationWeights{Post: 0.2, Get: 0.65, List: 0.1, Delete: 0.05}
+	case WorkloadWriteHeavy:
+		return OperationWeights{Post: 0.8, Get: 0.15, List: 0.0, Delete: 0.05}
+	case WorkloadCRUD:
+		return OperationWeights{Post: 0.4, Get: 0.4, List: 0.0, Delete: 0.2}
+	default:
+		return OperationWeights{Post: 1.0, Get: 0, List: 0, Delete: 0}
+	}
+}
 
 // StressTestConfig holds configuration for the stress test
 type StressTestConfig struct {
@@ -34,6 +90,12 @@ type StressTestConfig struct {
 	ExportStats      bool          // Whether to export detailed statistics (default: true)
 	VerboseProgress  bool          // Whether to show verbose progress reporting (default: false)
 	FailureThreshold float64       // Failure rate threshold for early termination (default: 50.0)
+
+	// New workload configuration
+	WorkloadPattern    WorkloadPattern
+	SizeDistribution   SizeDistribution
+	EnableCleanup      bool
+	CleanupConcurrency int
 }
 
 // FailureDetail represents a detailed failure record
@@ -65,6 +127,19 @@ type TimeSeriesPoint struct {
 	AvgResponseTime float64   `json:"avg_response_time_ms"`
 }
 
+// EndpointMetrics holds metrics for a specific endpoint
+type EndpointMetrics struct {
+	Endpoint          string         `json:"endpoint"`
+	TotalRequests     int64          `json:"total_requests"`
+	SuccessfulReqs    int64          `json:"successful_requests"`
+	FailedReqs        int64          `json:"failed_requests"`
+	TotalResponseTime int64          `json:"total_response_time_ms"`
+	MinResponseTime   int64          `json:"min_response_time_ms"`
+	MaxResponseTime   int64          `json:"max_response_time_ms"`
+	StatusCodes       map[int]int64  `json:"status_codes"`
+	mutex             sync.RWMutex   `json:"-"`
+}
+
 // TestMetrics holds comprehensive performance metrics for the stress test
 type TestMetrics struct {
 	// Basic counters
@@ -92,19 +167,68 @@ type TestMetrics struct {
 	MaxConcurrentReqs  int64
 	ConcurrentReqs     int64
 
+	// Per-endpoint metrics
+	EndpointMetrics    map[string]*EndpointMetrics
+
 	mutex              sync.RWMutex
 	startTime          time.Time
 }
 
+// ContentTracker tracks created content for reads and cleanup
+type ContentTracker struct {
+	IDs       []string
+	mutex     sync.RWMutex
+	maxLength int // Prevent memory issues
+}
+
+// NewContentTracker creates a new ContentTracker
+func NewContentTracker(maxLength int) *ContentTracker {
+	return &ContentTracker{
+		IDs:       make([]string, 0, maxLength),
+		maxLength: maxLength,
+	}
+}
+
+// Add adds a content ID to the tracker
+func (ct *ContentTracker) Add(id string) {
+	ct.mutex.Lock()
+	defer ct.mutex.Unlock()
+	if len(ct.IDs) < ct.maxLength {
+		ct.IDs = append(ct.IDs, id)
+	}
+}
+
+// GetRandom returns a random content ID from the tracker
+func (ct *ContentTracker) GetRandom() string {
+	ct.mutex.RLock()
+	defer ct.mutex.RUnlock()
+	if len(ct.IDs) == 0 {
+		return ""
+	}
+	return ct.IDs[rand.Intn(len(ct.IDs))]
+}
+
+// GetAll returns all tracked content IDs
+func (ct *ContentTracker) GetAll() []string {
+	ct.mutex.RLock()
+	defer ct.mutex.RUnlock()
+	ids := make([]string, len(ct.IDs))
+	copy(ids, ct.IDs)
+	return ids
+}
+
 // StressTest manages the stress testing process
 type StressTest struct {
-	config     *StressTestConfig
-	metrics    *TestMetrics
-	httpClient *http.Client
-	serverCmd  *exec.Cmd
-	ctx        context.Context
-	cancel     context.CancelFunc
-	baseURL    string
+	config         *StressTestConfig
+	metrics        *TestMetrics
+	httpClient     *http.Client
+	serverCmd      *exec.Cmd
+	ctx            context.Context
+	cancel         context.CancelFunc
+	baseURL        string
+	contentTracker *ContentTracker
+	rand           *rand.Rand
+	randMutex      sync.Mutex
 }
 
 func main() {
@@ -142,6 +266,16 @@ func parseFlags() *StressTestConfig {
 	flag.BoolVar(&config.VerboseProgress, "verbose", false, "Show verbose progress reporting")
 	flag.Float64Var(&config.FailureThreshold, "failure-threshold", 50.0, "Failure rate threshold (%) for early termination")
 
+	// New workload configuration flags
+	flag.StringVar((*string)(&config.WorkloadPattern), "workload", "write-only",
+		"Workload pattern: write-only, read-only, balanced, read-heavy, write-heavy, crud")
+	flag.Float64Var(&config.SizeDistribution.Tiny, "size-tiny", 0.4, "Weight for tiny content (10-100 bytes)")
+	flag.Float64Var(&config.SizeDistribution.Small, "size-small", 0.4, "Weight for small content (100B - 1KB)")
+	flag.Float64Var(&config.SizeDistribution.Medium, "size-medium", 0.15, "Weight for medium content (1KB - 100KB)")
+	flag.Float64Var(&config.SizeDistribution.Large, "size-large", 0.05, "Weight for large content (100KB - 1MB)")
+	flag.BoolVar(&config.EnableCleanup, "cleanup", true, "Enable post-test data cleanup")
+	flag.IntVar(&config.CleanupConcurrency, "cleanup-concurrency", 50, "Concurrent cleanup workers")
+
 	flag.Parse()
 
 	return config
@@ -169,6 +303,18 @@ func displayConfig(config *StressTestConfig) {
 	fmt.Printf("Export Stats: %t\n", config.ExportStats)
 	fmt.Printf("Verbose Progress: %t\n", config.VerboseProgress)
 	fmt.Printf("Failure Threshold: %.1f%%\n", config.FailureThreshold)
+
+	// Display workload configuration
+	fmt.Println("\n📊 Workload Configuration:")
+	fmt.Printf("   Pattern: %s\n", config.WorkloadPattern)
+	weights := config.WorkloadPattern.GetWeights()
+	fmt.Printf("   Operations - POST: %.0f%%, GET: %.0f%%, LIST: %.0f%%, DELETE: %.0f%%\n",
+		weights.Post*100, weights.Get*100, weights.List*100, weights.Delete*100)
+	fmt.Printf("   Size Distribution - Tiny: %.0f%%, Small: %.0f%%, Medium: %.0f%%, Large: %.0f%%\n",
+		config.SizeDistribution.Tiny*100, config.SizeDistribution.Small*100,
+		config.SizeDistribution.Medium*100, config.SizeDistribution.Large*100)
+	fmt.Printf("   Cleanup Enabled: %t (concurrency: %d)\n", config.EnableCleanup, config.CleanupConcurrency)
+
 	fmt.Println(strings.Repeat("=", 50))
 	fmt.Println()
 }
@@ -178,9 +324,11 @@ func NewStressTest(config *StressTestConfig) *StressTest {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Configure HTTP transport with optional TLS settings
+	// High concurrency settings for stress testing
 	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 10,
+		MaxIdleConns:        500,
+		MaxIdleConnsPerHost: 100,
+		MaxConnsPerHost:     200,
 		IdleConnTimeout:     90 * time.Second,
 	}
 
@@ -207,19 +355,19 @@ func NewStressTest(config *StressTestConfig) *StressTest {
 		FailuresByType:     make(map[string]int64),
 		FailuresByEndpoint: make(map[string]int64),
 		TimeSeries:         make([]TimeSeriesPoint, 0, 100),
+		EndpointMetrics:    make(map[string]*EndpointMetrics),
 		startTime:          time.Now(),
 	}
 
 	st := &StressTest{
-		config: config,
-		metrics: metrics,
-		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
-			Transport: transport,
-		},
-		ctx:     ctx,
-		cancel:  cancel,
-		baseURL: fmt.Sprintf("%s://%s:%s", protocol, config.ServerHost, config.ServerPort),
+		config:         config,
+		metrics:        metrics,
+		httpClient:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		ctx:            ctx,
+		cancel:         cancel,
+		baseURL:        fmt.Sprintf("%s://%s:%s", protocol, config.ServerHost, config.ServerPort),
+		contentTracker: NewContentTracker(100000), // Track up to 100k content IDs
+		rand:           rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	return st
@@ -271,6 +419,9 @@ func (st *StressTest) Run() error {
 	}
 
 	duration := time.Since(startTime)
+
+	// Perform cleanup of test data
+	st.performCleanup()
 
 	// Generate comprehensive final report
 	st.generateFinalReport(duration)
@@ -446,7 +597,7 @@ func (st *StressTest) executeStressTest() error {
 	}
 }
 
-// executeRequest executes a single API request
+// executeRequest executes a single API request based on workload pattern
 func (st *StressTest) executeRequest(requestID int64) {
 	startTime := time.Now()
 
@@ -463,26 +614,150 @@ func (st *StressTest) executeRequest(requestID int64) {
 		}
 	}
 
-	// Simple POST request to create content
-	statusCode, err := st.executePostContent(requestID)
+	// Select operation based on workload pattern
+	operation := st.selectOperation()
+
+	var statusCode int
+	var err error
+	var endpoint string
+
+	switch operation {
+	case "POST":
+		statusCode, err, endpoint = st.executePostContent(requestID)
+	case "GET":
+		statusCode, err, endpoint = st.executeGetContent()
+	case "LIST":
+		statusCode, err, endpoint = st.executeListContent()
+	case "DELETE":
+		statusCode, err, endpoint = st.executeDeleteContent()
+	default:
+		statusCode, err, endpoint = st.executePostContent(requestID)
+	}
 
 	duration := time.Since(startTime)
-	st.recordMetrics(requestID, duration, statusCode, err, "/api/v1/content/")
+	st.recordMetrics(requestID, duration, statusCode, err, endpoint)
+}
+
+// selectOperation selects an operation based on workload pattern weights
+func (st *StressTest) selectOperation() string {
+	weights := st.config.WorkloadPattern.GetWeights()
+	r := st.randomFloat64()
+	cumulative := 0.0
+
+	if weights.Post > 0 {
+		cumulative += weights.Post
+		if r < cumulative {
+			return "POST"
+		}
+	}
+	if weights.Get > 0 {
+		cumulative += weights.Get
+		if r < cumulative {
+			return "GET"
+		}
+	}
+	if weights.List > 0 {
+		cumulative += weights.List
+		if r < cumulative {
+			return "LIST"
+		}
+	}
+	if weights.Delete > 0 {
+		cumulative += weights.Delete
+		if r < cumulative {
+			return "DELETE"
+		}
+	}
+
+	return "POST" // Default fallback
+}
+
+// randomFloat64 returns a thread-safe random float64 in [0.0, 1.0)
+func (st *StressTest) randomFloat64() float64 {
+	st.randMutex.Lock()
+	defer st.randMutex.Unlock()
+	return st.rand.Float64()
+}
+
+// randomIntn returns a thread-safe random integer in [0, n)
+func (st *StressTest) randomIntn(n int) int {
+	if n <= 0 {
+		return 0
+	}
+	st.randMutex.Lock()
+	defer st.randMutex.Unlock()
+	return st.rand.Intn(n)
+}
+
+// selectSizeCategory selects a content size category based on distribution weights
+func (st *StressTest) selectSizeCategory() ContentSizeCategory {
+	r := st.randomFloat64()
+	cumulative := 0.0
+
+	cumulative += st.config.SizeDistribution.Tiny
+	if r < cumulative {
+		return SizeTiny
+	}
+
+	cumulative += st.config.SizeDistribution.Small
+	if r < cumulative {
+		return SizeSmall
+	}
+
+	cumulative += st.config.SizeDistribution.Medium
+	if r < cumulative {
+		return SizeMedium
+	}
+
+	return SizeLarge
+}
+
+// generateSizeBytes generates a random size in bytes for a given category
+func (st *StressTest) generateSizeBytes(category ContentSizeCategory) int {
+	switch category {
+	case SizeTiny:
+		return 10 + st.randomIntn(90) // 10-100 bytes
+	case SizeSmall:
+		return 100 + st.randomIntn(900) // 100B - 1KB
+	case SizeMedium:
+		return 1024 + st.randomIntn(100*1024) // 1KB - 100KB
+	case SizeLarge:
+		return 100*1024 + st.randomIntn(900*1024) // 100KB - 1MB
+	default:
+		return 20
+	}
+}
+
+// generateData generates random data of the specified size
+func (st *StressTest) generateData(sizeBytes int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
+	result := make([]byte, sizeBytes)
+	for i := range result {
+		result[i] = charset[st.randomIntn(len(charset))]
+	}
+	return string(result)
 }
 
 // executePostContent performs a POST request to store content
-func (st *StressTest) executePostContent(requestID int64) (int, error) {
-	// Generate simple content
-	contentID := fmt.Sprintf("stress-test-%d", requestID)
-	content := map[string]interface{}{
+func (st *StressTest) executePostContent(requestID int64) (int, error, string) {
+	endpoint := "POST /api/v1/content/"
+
+	// Select size based on distribution
+	category := st.selectSizeCategory()
+	sizeBytes := st.generateSizeBytes(category)
+
+	// Generate content
+	contentID := fmt.Sprintf("stress-%d-%d", requestID, time.Now().UnixNano())
+	content := map[string]any{
 		"id":   contentID,
-		"data": fmt.Sprintf("test data %d", requestID),
+		"data": st.generateData(sizeBytes),
 		"type": "text/plain",
+		"tag":  string(category),
 	}
 
 	jsonData, err := json.Marshal(content)
 	if err != nil {
-		return 0, err
+		return 0, err, endpoint
 	}
 
 	resp, err := st.httpClient.Post(
@@ -491,17 +766,138 @@ func (st *StressTest) executePostContent(requestID int64) (int, error) {
 		strings.NewReader(string(jsonData)),
 	)
 	if err != nil {
-		return 0, err
+		return 0, err, endpoint
 	}
 	defer resp.Body.Close()
 
 	// Read response body to ensure complete processing
 	io.Copy(io.Discard, resp.Body)
 
-	return resp.StatusCode, nil
+	// Track successful content creation for reads and cleanup
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		st.contentTracker.Add(contentID)
+	}
+
+	return resp.StatusCode, nil, endpoint
 }
 
+// executeGetContent performs GET /api/v1/content/:id
+func (st *StressTest) executeGetContent() (int, error, string) {
+	endpoint := "GET /api/v1/content/:id"
 
+	id := st.contentTracker.GetRandom()
+	if id == "" {
+		// No content to read, skip this request
+		return 0, fmt.Errorf("no content available for read"), endpoint
+	}
+
+	resp, err := st.httpClient.Get(st.baseURL + "/api/v1/content/" + id)
+	if err != nil {
+		return 0, err, endpoint
+	}
+	defer resp.Body.Close()
+
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, nil, endpoint
+}
+
+// executeListContent performs GET /api/v1/content/
+func (st *StressTest) executeListContent() (int, error, string) {
+	endpoint := "GET /api/v1/content/"
+
+	resp, err := st.httpClient.Get(st.baseURL + "/api/v1/content/?limit=10")
+	if err != nil {
+		return 0, err, endpoint
+	}
+	defer resp.Body.Close()
+
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, nil, endpoint
+}
+
+// executeDeleteContent performs DELETE /api/v1/content/:id
+func (st *StressTest) executeDeleteContent() (int, error, string) {
+	endpoint := "DELETE /api/v1/content/:id"
+
+	id := st.contentTracker.GetRandom()
+	if id == "" {
+		// No content to delete, skip this request
+		return 0, fmt.Errorf("no content available for delete"), endpoint
+	}
+
+	req, err := http.NewRequest("DELETE", st.baseURL+"/api/v1/content/"+id, nil)
+	if err != nil {
+		return 0, err, endpoint
+	}
+
+	resp, err := st.httpClient.Do(req)
+	if err != nil {
+		return 0, err, endpoint
+	}
+	defer resp.Body.Close()
+
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode, nil, endpoint
+}
+
+// performCleanup deletes all test content created during the stress test
+func (st *StressTest) performCleanup() {
+	if !st.config.EnableCleanup {
+		fmt.Println("⏭️  Skipping cleanup (disabled)")
+		return
+	}
+
+	ids := st.contentTracker.GetAll()
+	if len(ids) == 0 {
+		fmt.Println("⏭️  No content to clean up")
+		return
+	}
+
+	fmt.Printf("\n🧹 Cleaning up %d content items...\n", len(ids))
+	startTime := time.Now()
+
+	semaphore := make(chan struct{}, st.config.CleanupConcurrency)
+	var wg sync.WaitGroup
+	var deleted, failed int64
+
+	for _, id := range ids {
+		// Acquire semaphore BEFORE spawning goroutine to limit concurrent goroutines
+		semaphore <- struct{}{}
+		wg.Add(1)
+		go func(contentID string) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+
+			req, err := http.NewRequest("DELETE", st.baseURL+"/api/v1/content/"+contentID, nil)
+			if err != nil {
+				atomic.AddInt64(&failed, 1)
+				return
+			}
+
+			resp, err := st.httpClient.Do(req)
+			if err != nil {
+				atomic.AddInt64(&failed, 1)
+				return
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+				atomic.AddInt64(&deleted, 1)
+			} else {
+				atomic.AddInt64(&failed, 1)
+			}
+		}(id)
+	}
+
+	wg.Wait()
+
+	elapsed := time.Since(startTime)
+	if failed > 0 {
+		fmt.Printf("⚠️  Cleanup completed: %d deleted, %d failed in %v\n", deleted, failed, elapsed.Round(time.Millisecond))
+	} else {
+		fmt.Printf("✅ Cleanup completed: %d items deleted in %v\n", deleted, elapsed.Round(time.Millisecond))
+	}
+}
 
 // recordMetrics records comprehensive performance metrics for a request
 func (st *StressTest) recordMetrics(requestID int64, duration time.Duration, statusCode int, err error, endpoint string) {
@@ -537,6 +933,43 @@ func (st *StressTest) recordMetrics(requestID int64, duration time.Duration, sta
 
 		// Record detailed failure information
 		st.recordFailureDetails(requestID, statusCode, err, durationMs, endpoint)
+	}
+
+	// Record per-endpoint metrics
+	st.recordEndpointMetrics(endpoint, durationMs, statusCode, err)
+}
+
+// recordEndpointMetrics records metrics for a specific endpoint
+func (st *StressTest) recordEndpointMetrics(endpoint string, durationMs int64, statusCode int, err error) {
+	metrics := st.metrics.EndpointMetrics[endpoint]
+	if metrics == nil {
+		metrics = &EndpointMetrics{
+			Endpoint:        endpoint,
+			MinResponseTime: int64(^uint64(0) >> 1),
+			MaxResponseTime: 0,
+			StatusCodes:     make(map[int]int64),
+		}
+		st.metrics.EndpointMetrics[endpoint] = metrics
+	}
+
+	metrics.mutex.Lock()
+	defer metrics.mutex.Unlock()
+
+	metrics.TotalRequests++
+	metrics.TotalResponseTime += durationMs
+	metrics.StatusCodes[statusCode]++
+
+	if durationMs < metrics.MinResponseTime {
+		metrics.MinResponseTime = durationMs
+	}
+	if durationMs > metrics.MaxResponseTime {
+		metrics.MaxResponseTime = durationMs
+	}
+
+	if err == nil && statusCode >= 200 && statusCode < 300 {
+		metrics.SuccessfulReqs++
+	} else {
+		metrics.FailedReqs++
 	}
 }
 
@@ -723,8 +1156,12 @@ func (st *StressTest) generateFinalReport(duration time.Duration) {
 	failedReqs := atomic.LoadInt64(&st.metrics.FailedRequests)
 	maxConcurrent := atomic.LoadInt64(&st.metrics.MaxConcurrentReqs)
 
-	rps := float64(totalReqs) / duration.Seconds()
-	successRate := float64(successReqs) / float64(totalReqs) * 100
+	var rps float64
+	var successRate float64
+	if totalReqs > 0 {
+		rps = float64(totalReqs) / duration.Seconds()
+		successRate = float64(successReqs) / float64(totalReqs) * 100
+	}
 
 	// Basic Performance Metrics
 	fmt.Println("\n📈 PERFORMANCE METRICS")
@@ -735,9 +1172,13 @@ func (st *StressTest) generateFinalReport(duration time.Duration) {
 	fmt.Printf("✅ Successful Requests:    %d (%.1f%%)\n", successReqs, successRate)
 	fmt.Printf("❌ Failed Requests:        %d (%.1f%%)\n", failedReqs, 100-successRate)
 	fmt.Printf("🔄 Max Concurrent:         %d\n", maxConcurrent)
+	fmt.Printf("📋 Workload Pattern:       %s\n", st.config.WorkloadPattern)
 
 	// Response Time Statistics
 	st.generateResponseTimeReport()
+
+	// Per-Endpoint Performance
+	st.generateEndpointReport()
 
 	// Detailed Failure Analysis
 	if failedReqs > 0 {
@@ -771,6 +1212,43 @@ func (st *StressTest) generateFinalReport(duration time.Duration) {
 	fmt.Println("\n" + strings.Repeat("=", 80))
 	fmt.Printf("🎯 FINAL RESULT: %.1f RPS with %.1f%% success rate\n", rps, successRate)
 	fmt.Println(strings.Repeat("=", 80))
+}
+
+// generateEndpointReport generates per-endpoint performance breakdown
+func (st *StressTest) generateEndpointReport() {
+	fmt.Println("\n📊 PER-ENDPOINT PERFORMANCE")
+	fmt.Println(strings.Repeat("-", 60))
+
+	if len(st.metrics.EndpointMetrics) == 0 {
+		fmt.Println("No endpoint data available")
+		return
+	}
+
+	for endpoint, metrics := range st.metrics.EndpointMetrics {
+		if metrics.TotalRequests == 0 {
+			continue
+		}
+
+		avgTime := float64(metrics.TotalResponseTime) / float64(metrics.TotalRequests)
+		var successRate float64
+		if metrics.TotalRequests > 0 {
+			successRate = float64(metrics.SuccessfulReqs) / float64(metrics.TotalRequests) * 100
+		}
+
+		fmt.Printf("\n🎯 %s\n", endpoint)
+		fmt.Printf("   Requests: %d | Success: %.1f%% | Avg: %.1fms | Min: %dms | Max: %dms\n",
+			metrics.TotalRequests, successRate, avgTime, metrics.MinResponseTime, metrics.MaxResponseTime)
+
+		// Show status code distribution
+		if len(metrics.StatusCodes) > 0 {
+			fmt.Printf("   Status Codes: ")
+			codes := make([]string, 0, len(metrics.StatusCodes))
+			for code, count := range metrics.StatusCodes {
+				codes = append(codes, fmt.Sprintf("%d:%d", code, count))
+			}
+			fmt.Println(strings.Join(codes, ", "))
+		}
+	}
 }
 
 // generateResponseTimeReport generates detailed response time statistics
