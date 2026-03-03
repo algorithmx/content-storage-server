@@ -1,76 +1,5 @@
-// Package main provides the Content Storage Server with comprehensive API documentation.
-//
-// @title Content Storage Server API
-// @version 1.0
-// @description A high-performance content storage server with enterprise features including expiration, access limits, backup management, and sequential write processing.
-// @description
-// @description ## Configuration Impact on API Behavior
-// @description
-// @description The server behavior is heavily influenced by environment configuration:
-// @description
-// @description ### Authentication (ENABLE_AUTH)
-// @description - When `ENABLE_AUTH=true`: All API endpoints except `/health`, `/health/detailed`, `/ping`, and `/debug/*` require authentication
-// @description - Authentication methods: `X-API-Key` header or `api_key` query parameter
-// @description - When `ENABLE_AUTH=false`: All endpoints are publicly accessible
-// @description
-// @description ### Content Size Limits (MAX_CONTENT_SIZE)
-// @description - Default: 10MB (10485760 bytes)
-// @description - All content storage operations validate against this limit
-// @description - Exceeding this limit returns HTTP 400 with validation error
-// @description
-// @description ### Rate Limiting (THROTTLE_LIMIT, THROTTLE_BACKLOG_LIMIT)
-// @description - `THROTTLE_LIMIT`: Maximum concurrent requests (default: 1000)
-// @description - `THROTTLE_BACKLOG_LIMIT`: Maximum queued requests (default: 50)
-// @description - Exceeding limits returns HTTP 429 Too Many Requests
-// @description
-// @description ### Content Type Restrictions (ALLOWED_CONTENT_TYPES)
-// @description - Default: `application/json,text/plain`
-// @description - Only specified content types are accepted for requests
-// @description - Invalid content types return HTTP 415 Unsupported Media Type
-// @description
-// @description ### Compression (ENABLE_COMPRESSION, COMPRESSION_LEVEL)
-// @description - When enabled, responses are compressed based on Accept-Encoding header
-// @description - Compression level affects CPU usage vs bandwidth trade-off
-// @description
-// @description ### Backup & Storage Reliability
-// @description - `BACKUP_INTERVAL`: Automated backup frequency (default: 6h)
-// @description - `GC_INTERVAL`: Garbage collection frequency (default: 5m)
-// @description - `PERFORMANCE_MODE`: Enable performance optimizations (default: true)
-// @description - Sequential write processing ensures data consistency and emergency shutdown capabilities
-// @description
-// @description ### Emergency Shutdown & Recovery
-// @description - `ENABLE_EMERGENCY_RECOVERY`: Enable automatic recovery from emergency shutdowns (default: true)
-// @description - Emergency shutdown preserves volatile queue state for automatic recovery on restart
-// @description - Graceful shutdown (SIGTERM, single Ctrl+C): Waits for pending operations with 30s timeout
-// @description - Emergency shutdown (SIGUSR1, double Ctrl+C): Immediate termination with state preservation
-// @description - Recovery files stored in `backups/emergency-recovery/` with automatic archival after processing
-// @description
-// @description ### Write Queue System
-// @description - `WRITE_QUEUE_SIZE`: Maximum queue capacity (default: 1000, auto-doubles when full)
-// @description - `WRITE_QUEUE_BATCH_SIZE`: Items processed per batch (default: 10)
-// @description - `WRITE_QUEUE_BATCH_TIMEOUT`: Maximum wait before processing partial batch (default: 100ms)
-// @description - Sequential processing prevents race conditions and ensures data consistency
-// @description - Queue metrics available via `/api/v1/metrics` endpoint for monitoring
-// @description
-// @termsOfService https://example.com/terms/
-// @contact.name API Support
-// @contact.url https://example.com/support
-// @contact.email support@example.com
-// @license.name MIT
-// @license.url https://opensource.org/licenses/MIT
-// @host localhost:8081
-// @BasePath /
-// @schemes http https
-//
-// @securityDefinitions.apikey ApiKeyAuth
-// @in header
-// @name X-API-Key
-// @description API key authentication. Required when ENABLE_AUTH=true. Can also be provided as 'api_key' query parameter.
-//
-// @securityDefinitions.apikey ApiKeyQuery
-// @in query
-// @name api_key
-// @description API key authentication via query parameter. Alternative to X-API-Key header.
+// Package main provides the Content Storage Server with OpenAPI 3.0 documentation.
+// See api/openapi.yaml for the full API specification.
 package main
 
 import (
@@ -84,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"content-storage-server/api"
 	"content-storage-server/internal/handlers"
 	"content-storage-server/pkg/config"
 	"content-storage-server/pkg/logger"
@@ -92,10 +22,7 @@ import (
 	tls "content-storage-server/pkg/tls"
 
 	"github.com/labstack/echo/v4"
-	echoSwagger "github.com/swaggo/echo-swagger"
 	"go.uber.org/zap"
-
-	_ "content-storage-server/docs" // Import generated docs
 )
 
 
@@ -187,19 +114,15 @@ func main() {
 	// Initialize shutdown handler for coordinated shutdown management
 	shutdownHandler := handlers.NewShutdownHandler(appLogger)
 
-	// Initialize HTTP request handlers for content and health management
-	contentHandler := handlers.NewContentHandler(store, appLogger, cfg)
-	healthHandler := handlers.NewHealthHandler(store, appLogger)
-
 	// Setup Echo router with middleware stack and route definitions
-	router := setupRouter(cfg, contentHandler, healthHandler, shutdownHandler, appLogger)
+	router := setupRouter(cfg, store, shutdownHandler, appLogger)
 
 	// Log router and middleware configuration
 	appLogger.Info("HTTP Router Configuration",
 		zap.String("framework", "Echo v4"),
 		zap.String("middleware_stack", "rate_limiting, security, compression, authentication"),
-		zap.Bool("swagger_enabled", true),
-		zap.String("swagger_endpoint", "/swagger/*"),
+		zap.Bool("openapi_enabled", true),
+		zap.String("openapi_endpoint", "/openapi.yaml"),
 		zap.Bool("static_files_enabled", true),
 		zap.String("static_path", "/static"),
 		zap.String("management_interface", "/"),
@@ -401,7 +324,7 @@ func initializeStorage(cfg *config.Config, appLogger *zap.Logger) (storage.Stora
 // - **Metrics**: System performance and operational metrics
 //
 // Returns configured Echo router ready for HTTP server attachment.
-func setupRouter(cfg *config.Config, contentHandler *handlers.ContentHandler, healthHandler *handlers.HealthHandler, shutdownHandler *handlers.ShutdownHandler, appLogger *zap.Logger) *echo.Echo {
+func setupRouter(cfg *config.Config, store storage.Storage, shutdownHandler *handlers.ShutdownHandler, appLogger *zap.Logger) *echo.Echo {
 	e := echo.New()
 
 	// CRITICAL: Apply shutdown middleware FIRST to immediately refuse requests during shutdown
@@ -410,9 +333,11 @@ func setupRouter(cfg *config.Config, contentHandler *handlers.ContentHandler, he
 	// Apply comprehensive middleware stack (rate limiting, security, compression, auth)
 	custommiddleware.SetupMiddleware(e, cfg, appLogger)
 
-	// Health check routes (publicly accessible, no authentication required)
-	e.GET("/health", healthHandler.HealthCheck)
-	e.GET("/health/detailed", healthHandler.DetailedHealthCheck)
+	// Create OpenAPI adapter implementing generated interface
+	adapter := handlers.NewOpenAPIAdapter(store, appLogger, cfg)
+
+	// Register all API routes from OpenAPI spec
+	api.RegisterHandlers(e, adapter)
 
 	// Static file serving for management interface assets (publicly accessible)
 	e.Static("/static", "static")
@@ -422,33 +347,16 @@ func setupRouter(cfg *config.Config, contentHandler *handlers.ContentHandler, he
 		return c.File("static/index.html")
 	})
 
-	// Swagger API documentation (publicly accessible for development)
-	e.GET("/swagger/*", echoSwagger.WrapHandler)
+	// Serve OpenAPI spec
+	e.GET("/openapi.yaml", func(c echo.Context) error {
+		return c.File("api/openapi.yaml")
+	})
 
 	// Performance profiler endpoints (conditionally enabled for debugging)
 	if cfg.EnableProfiler {
 		e.GET("/debug/pprof/*", echo.WrapHandler(http.DefaultServeMux))
 		appLogger.Info("Profiler endpoints enabled at /debug/pprof/")
 	}
-
-	// API v1 route group (subject to authentication if enabled)
-	api := e.Group("/api/v1")
-
-	// Content management routes
-	content := api.Group("/content")
-	content.POST("/", contentHandler.StoreContent)     // Create new content
-	content.GET("/", contentHandler.ListContent)       // List content with pagination
-	content.GET("/count", contentHandler.GetContentCount) // Get total content count
-	content.GET("/:id", contentHandler.GetContent)     // Retrieve specific content by ID
-	content.GET("/:id/status", contentHandler.GetContentStatus) // Check content storage status
-	content.DELETE("/:id", contentHandler.DeleteContent) // Delete content by ID
-
-	// System management and monitoring routes
-	api.POST("/sync", healthHandler.TriggerSync)           // Manual synchronization trigger
-	api.POST("/backup", healthHandler.CreateBackup)       // Manual backup creation
-	api.POST("/cleanup", healthHandler.CleanupAccessTrackers) // Cleanup access tracking data
-	api.POST("/gc", healthHandler.TriggerGC)              // Manual garbage collection
-	api.GET("/metrics", healthHandler.GetMetrics)         // System metrics and statistics
 
 	return e
 }

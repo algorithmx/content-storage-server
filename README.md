@@ -19,7 +19,7 @@ go build -o server ./cmd/server
 
 ### Access Points
 - **Dashboard**: http://localhost:8081/
-- **API Docs**: http://localhost:8081/swagger/index.html
+- **OpenAPI Spec**: http://localhost:8081/openapi.yaml
 - **Health**: http://localhost:8081/health
 
 ### Basic Usage
@@ -87,7 +87,33 @@ Content storage is async for performance and safety:
 
 ### Interface
 - `GET /` - Management dashboard
-- `GET /swagger/*` - API documentation
+- `GET /openapi.yaml` - OpenAPI 3.0 specification
+
+## API Documentation
+
+The API is documented using OpenAPI 3.0. The spec is available at:
+
+- **OpenAPI Spec**: http://localhost:8081/openapi.yaml
+- **File Location**: `api/openapi.yaml`
+
+### Generating Client SDKs
+
+```bash
+# Generate Go client
+oapi-codegen -generate client -package client api/openapi.yaml > client.gen.go
+
+# Generate TypeScript client (using openapi-generator)
+npx @openapitools/openapi-generator-cli generate \
+  -i api/openapi.yaml \
+  -g typescript-axios \
+  -o ./generated-client
+```
+
+### Regenerating Server Types
+
+```bash
+cd api && go generate ./...
+```
 
 ## Configuration
 

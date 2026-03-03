@@ -1,0 +1,1209 @@
+openapi: 3.0.3
+info:
+  title: Content Storage Server API
+  version: 1.0.0
+  description: >
+    High-performance content storage server with enterprise features including
+    expiration, access limits, backup management, and sequential write processing.
+
+
+    ## Configuration Impact on API Behavior
+
+    The server behavior is heavily influenced by environment configuration:
+
+
+    ### Authentication (ENABLE_AUTH)
+
+    - When `ENABLE_AUTH=true`: All API endpoints except `/health`, `/health/detailed` require authentication
+
+    - Authentication methods: `X-API-Key` header or `api_key` query parameter
+
+    - When `ENABLE_AUTH=false`: All endpoints are publicly accessible
+
+
+    ### Content Size Limits (MAX_CONTENT_SIZE)
+
+    - Default: 10MB (10485760 bytes)
+
+    - Exceeding this limit returns HTTP 400 with validation error
+
+
+    ### Rate Limiting (THROTTLE_LIMIT)
+
+    - Maximum concurrent requests (default: 1000)
+
+    - Exceeding limits returns HTTP 429 Too Many Requests
+
+
+    ### Content Type Restrictions (ALLOWED_CONTENT_TYPES)
+
+    - Default: `application/json,text/plain`
+
+    - Invalid content types return HTTP 415 Unsupported Media Type
+
+  termsOfService: https://example.com/terms/
+  contact:
+    name: API Support
+    url: https://example.com/support
+    email: support@example.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8081
+    description: Development server
+  - url: https://{hostname}
+    description: Production server
+    variables:
+      hostname:
+        default: api.example.com
+
+tags:
+  - name: Content Operations
+    description: CRUD operations for content storage
+  - name: Management Operations
+    description: Backup, sync, GC, and cleanup operations
+  - name: Health & Monitoring
+    description: Health checks and system metrics
+
+paths:
+  /api/v1/content:
+    post:
+      operationId: storeContent
+      tags:
+        - Content Operations
+      summary: Store new content with sequential write processing
+      description: >
+        Store new content in the system using sequential write queue for data consistency.
+
+
+        Content is queued for sequential processing to ensure data consistency.
+
+        Returns HTTP 202 (Accepted) immediately after validation and queuing.
+
+        Use GET /api/v1/content/{id}/status to check storage completion.
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StorageRequest'
+            examples:
+              text_content:
+                summary: Plain text content
+                value:
+                  id: user-123-document
+                  data: Hello, World!
+                  type: text/plain
+                  tag: user-documents
+              json_content:
+                summary: JSON content
+                value:
+                  id: config-456
+                  data: '{"theme": "dark", "language": "en"}'
+                  type: application/json
+      responses:
+        '202':
+          description: Content queued for storage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Validation failed or invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Content size exceeds MAX_CONTENT_SIZE limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '415':
+          description: Content type not in ALLOWED_CONTENT_TYPES
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      operationId: listContent
+      tags:
+        - Content Operations
+      summary: List content with advanced filtering and access count tracking
+      description: >
+        List all content with support for pagination, advanced filtering,
+        and real-time access count information.
+
+
+        Default limit: 100, maximum: 1000.
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+          description: Number of items per page (max 1000)
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+          description: Number of items to skip
+        - name: type
+          in: query
+          schema:
+            type: string
+          description: Filter by content type (MIME type)
+          example: text/plain
+        - name: tag
+          in: query
+          schema:
+            type: string
+          description: Filter by content tag
+          example: user-documents
+        - name: created_after
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter content created after timestamp (RFC3339)
+          example: "2024-01-01T00:00:00Z"
+        - name: created_before
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Filter content created before timestamp (RFC3339)
+          example: "2024-12-31T23:59:59Z"
+        - name: include_expired
+          in: query
+          schema:
+            type: boolean
+            default: false
+          description: Include expired content in results
+      responses:
+        '200':
+          description: Content listed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentListResponse'
+        '400':
+          description: Invalid pagination or filter parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/content/{id}:
+    get:
+      operationId: getContent
+      tags:
+        - Content Operations
+      summary: Retrieve content by ID with atomic access tracking
+      description: >
+        Retrieve specific content by ID with atomic access count increment
+        and expiration checking.
+
+
+        Returns 404 if content not found or time-expired.
+
+        Returns 410 if content has reached its access limit.
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 255
+            pattern: '^[a-zA-Z0-9._-]+$'
+          description: Content ID
+          example: user-123-document
+      responses:
+        '200':
+          description: Content retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Content'
+        '400':
+          description: Invalid content ID format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Content not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: Content access limit reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: deleteContent
+      tags:
+        - Content Operations
+      summary: Delete content by ID with write conflict handling
+      description: >
+        Delete specific content by ID from the storage system with
+        intelligent retry logic for write conflicts.
+
+
+        Automatically retries deletion if content is currently being
+        written to queue. Maximum 3 retry attempts.
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 255
+            pattern: '^[a-zA-Z0-9._-]+$'
+          description: Content ID to delete
+          example: user-123-document
+      responses:
+        '200':
+          description: Content deleted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid content ID format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Content not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/content/{id}/status:
+    get:
+      operationId: getContentStatus
+      tags:
+        - Content Operations
+      summary: Get content storage status with queue visibility
+      description: >
+        Check the current storage status of content with visibility
+        into sequential write queue processing.
+
+
+        Status values:
+
+        - queued: Content is in write queue awaiting processing
+
+        - stored: Content is persisted and available for retrieval
+
+        - not_found: Content ID does not exist
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            maxLength: 255
+            pattern: '^[a-zA-Z0-9._-]+$'
+          description: Content ID to check status
+          example: user-123-document
+      responses:
+        '200':
+          description: Content status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentStatusResponse'
+        '400':
+          description: Invalid content ID format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Content not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/content/count:
+    get:
+      operationId: getContentCount
+      tags:
+        - Content Operations
+      summary: Get total content count with storage-level optimization
+      description: >
+        Get the total number of stored content items using optimized
+        storage-level counting. Fast operation, no iteration required.
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      responses:
+        '200':
+          description: Content count retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CountResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/sync:
+    post:
+      operationId: triggerSync
+      tags:
+        - Management Operations
+      summary: Trigger manual database synchronization
+      description: >
+        Manually trigger a database synchronization operation.
+
+
+        Current implementation is a stub - no actual synchronization
+        logic is performed. Always returns success for compatibility.
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      responses:
+        '200':
+          description: Sync completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Sync operation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/backup:
+    post:
+      operationId: createBackup
+      tags:
+        - Management Operations
+      summary: Create manual database backup
+      description: >
+        Create a manual backup of the database with optional configuration.
+
+
+        Creates immediate backup regardless of BACKUP_INTERVAL schedule.
+
+        Only supported for BadgerDB storage backend.
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BackupRequest'
+      responses:
+        '200':
+          description: Backup created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BackupResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Backup operation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '501':
+          description: Backup not supported for storage type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/gc:
+    post:
+      operationId: triggerGC
+      tags:
+        - Management Operations
+      summary: Trigger manual garbage collection
+      description: >
+        Manually trigger database garbage collection to reclaim disk
+        space and optimize performance.
+
+
+        Only supported for BadgerDB storage backend.
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      responses:
+        '200':
+          description: Garbage collection completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GCResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Garbage collection failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/cleanup:
+    post:
+      operationId: cleanupAccessTrackers
+      tags:
+        - Management Operations
+      summary: Cleanup access trackers
+      description: >
+        Manually trigger cleanup of stale access trackers to prevent
+        memory leaks.
+
+
+        Removes stale access tracking data for non-existent content.
+
+        Only supported for BadgerDB storage backend.
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      responses:
+        '200':
+          description: Cleanup completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CleanupResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/metrics:
+    get:
+      operationId: getMetrics
+      tags:
+        - Health & Monitoring
+      summary: Get comprehensive system metrics
+      description: >
+        Retrieve detailed system metrics including storage health,
+        performance statistics, and operational intelligence.
+
+
+        Metrics vary based on storage implementation (BadgerDB provides
+        the most comprehensive metrics).
+      security:
+        - ApiKeyAuth: []
+        - ApiKeyQuery: []
+      responses:
+        '200':
+          description: Metrics retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MetricsResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /health:
+    get:
+      operationId: healthCheck
+      tags:
+        - Health & Monitoring
+      summary: Basic health check with storage connectivity verification
+      description: >
+        Simple health check endpoint that verifies server responsiveness
+        and basic storage connectivity for load balancers and monitoring.
+
+
+        No authentication required. No rate limiting applied.
+      responses:
+        '200':
+          description: Server is healthy and storage is accessible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /health/detailed:
+    get:
+      operationId: detailedHealthCheck
+      tags:
+        - Health & Monitoring
+      summary: Detailed health check with comprehensive system diagnostics
+      description: >
+        Comprehensive health check with detailed system metrics,
+        storage diagnostics, and adaptive HTTP status codes.
+
+
+        No authentication required. No rate limiting applied.
+
+
+        HTTP Status Codes:
+
+        - 200 OK: All systems healthy
+
+        - 206 Partial Content: System degraded but functional
+
+        - 503 Service Unavailable: System unhealthy
+      responses:
+        '200':
+          description: System is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedHealthResponse'
+        '206':
+          description: System is degraded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedHealthResponse'
+        '503':
+          description: System is unhealthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetailedHealthResponse'
+
+components:
+  schemas:
+    StorageRequest:
+      type: object
+      required:
+        - id
+        - type
+      properties:
+        id:
+          type: string
+          maxLength: 255
+          pattern: '^[a-zA-Z0-9._-]+$'
+          description: Unique content identifier (alphanumeric with dots, hyphens, underscores)
+          example: user-123-document
+        data:
+          type: string
+          description: >
+            Content data as a string. Format depends on content type:
+
+            - text/plain: Plain text content
+
+            - application/json: Valid JSON string
+
+            - application/octet-stream: Base64-encoded binary data
+          example: Hello, World!
+        type:
+          type: string
+          maxLength: 100
+          description: MIME type of the content
+          example: text/plain
+        tag:
+          type: string
+          maxLength: 100
+          description: Optional tag for categorization and filtering
+          example: user-documents
+        access_limit:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+          description: Content expires after this many retrievals
+          example: 10
+        expires_at:
+          type: string
+          format: date-time
+          description: RFC3339 timestamp when content expires
+          example: "2024-12-31T23:59:59Z"
+
+    Content:
+      type: object
+      properties:
+        id:
+          type: string
+          example: user-123-document
+        data:
+          type: string
+          description: Content data (format depends on type)
+          example: Hello, World!
+        type:
+          type: string
+          description: MIME type
+          example: text/plain
+        tag:
+          type: string
+          description: Content tag for categorization
+          example: user-documents
+        created_at:
+          type: string
+          format: date-time
+          description: Creation timestamp
+          example: "2024-01-01T00:00:00Z"
+        expires_at:
+          type: string
+          format: date-time
+          description: Expiration timestamp
+          example: "2024-12-31T23:59:59Z"
+        access_limit:
+          type: integer
+          description: Maximum allowed accesses
+          example: 10
+        access_count:
+          type: integer
+          format: int64
+          description: Current number of retrievals
+          example: 3
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Operation completed successfully
+        data:
+          type: object
+          additionalProperties: true
+
+    ErrorResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: Validation failed
+        data:
+          type: object
+          properties:
+            error:
+              type: string
+              example: Content size exceeds maximum allowed size
+
+    ContentListResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Content listed successfully
+        data:
+          type: object
+          properties:
+            contents:
+              type: array
+              items:
+                $ref: '#/components/schemas/Content'
+            total:
+              type: integer
+              description: Total number of items matching the filter
+              example: 150
+            limit:
+              type: integer
+              description: Number of items per page
+              example: 50
+            offset:
+              type: integer
+              description: Number of items skipped
+              example: 0
+            filters:
+              type: object
+              additionalProperties:
+                type: string
+              description: Applied filters
+              example:
+                type: text/plain
+                include_expired: "false"
+
+    ContentStatusResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Content status retrieved successfully
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              example: user-123-document
+            status:
+              type: string
+              enum:
+                - queued
+                - stored
+                - not_found
+              example: stored
+
+    CountResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Content count retrieved successfully
+        data:
+          type: object
+          properties:
+            count:
+              type: integer
+              example: 42
+
+    BackupRequest:
+      type: object
+      properties:
+        backup_name:
+          type: string
+          description: Optional custom backup name
+          example: manual-backup-2024
+        immediate:
+          type: boolean
+          default: true
+          description: Force immediate backup
+
+    BackupResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Backup created successfully
+        data:
+          type: object
+          properties:
+            success:
+              type: boolean
+              example: true
+            message:
+              type: string
+              example: Backup created successfully
+            backup_path:
+              type: string
+              example: /path/to/backup
+            backup_size_bytes:
+              type: integer
+              format: int64
+              example: 1024000
+            created_at:
+              type: string
+              format: date-time
+              example: "2024-01-01T00:00:00Z"
+
+    GCResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Garbage collection completed successfully
+        data:
+          type: object
+          properties:
+            duration:
+              type: string
+              example: 150ms
+
+    CleanupResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Access tracker cleanup completed successfully
+        data:
+          type: object
+          properties:
+            removed_trackers:
+              type: integer
+              example: 15
+            duration_ms:
+              type: integer
+              format: int64
+              description: Duration of the cleanup operation in milliseconds
+              example: 25
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: healthy
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-01T00:00:00Z"
+        uptime:
+          type: string
+          example: 1h30m45s
+        metrics:
+          type: object
+          properties:
+            content_count:
+              type: integer
+              example: 42
+
+    DetailedHealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+            - healthy
+            - degraded
+            - unhealthy
+          example: healthy
+        timestamp:
+          type: string
+          format: date-time
+          example: "2024-01-01T00:00:00Z"
+        uptime:
+          type: string
+          example: 1h30m45s
+        metrics:
+          type: object
+          properties:
+            content_count:
+              type: integer
+              example: 42
+            database_status:
+              type: string
+              example: healthy
+            backup_status:
+              type: string
+              example: healthy
+            gc_status:
+              type: string
+              example: healthy
+            last_backup:
+              type: string
+              format: date-time
+              example: "2024-01-01T00:00:00Z"
+            memory_usage:
+              type: integer
+              format: int64
+              example: 1024000
+            disk_usage:
+              type: integer
+              format: int64
+              example: 5120000
+            queue_metrics:
+              type: object
+              description: Write queue metrics for monitoring
+              properties:
+                queue_depth:
+                  type: integer
+                  description: Current number of items in the write queue
+                  example: 5
+                total_queued:
+                  type: integer
+                  format: int64
+                  description: Total number of items ever queued
+                  example: 1250
+                total_processed:
+                  type: integer
+                  format: int64
+                  description: Total number of items successfully processed
+                  example: 1245
+                total_errors:
+                  type: integer
+                  format: int64
+                  description: Total number of processing errors
+                  example: 0
+
+    MetricsResponse:
+      type: object
+      properties:
+        content_count:
+          type: integer
+          example: 42
+        database_size_bytes:
+          type: integer
+          format: int64
+          example: 5120000
+        health_status:
+          type: string
+          enum:
+            - healthy
+            - degraded
+            - unhealthy
+          example: healthy
+        last_backup:
+          type: string
+          format: date-time
+          example: "2024-01-01T00:00:00Z"
+        backup_count:
+          type: integer
+          example: 7
+        backup_stats:
+          type: object
+          properties:
+            total_backups:
+              type: integer
+              example: 7
+            last_backup_size:
+              type: integer
+              format: int64
+              example: 1024000
+        gc_stats:
+          type: object
+          properties:
+            last_run:
+              type: string
+              format: date-time
+              example: "2024-01-01T00:00:00Z"
+            runs_count:
+              type: integer
+              example: 10
+            avg_duration_ms:
+              type: integer
+              example: 150
+        queue_metrics:
+          type: object
+          properties:
+            queue_depth:
+              type: integer
+              example: 5
+            total_queued:
+              type: integer
+              format: int64
+              example: 1250
+            total_processed:
+              type: integer
+              format: int64
+              example: 1245
+            total_errors:
+              type: integer
+              format: int64
+              example: 0
+        access_manager_stats:
+          type: object
+          additionalProperties: true
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: API key authentication via header. Required when ENABLE_AUTH=true.
+    ApiKeyQuery:
+      type: apiKey
+      in: query
+      name: api_key
+      description: API key authentication via query parameter. Alternative to X-API-Key header.

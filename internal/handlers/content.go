@@ -208,12 +208,11 @@ func (h *ContentHandler) GetContent(c echo.Context) error {
 	}
 
 	// Note: Access count increment and expiration check are now handled atomically in storage layer
-	// Convert to swagger format for consistent API response
-	swaggerContent := toSwaggerContentWithAccess(content)
+	// Return content with access count
 	return c.JSON(http.StatusOK, models.StorageResponse{
 		Success: true,
 		Message: "Content retrieved successfully",
-		Data:    swaggerContent,
+		Data:    content,
 	})
 }
 
@@ -456,23 +455,22 @@ func (h *ContentHandler) ListContent(c echo.Context) error {
 		})
 	}
 
-	// Convert contents to swagger format with access counts
-	swaggerContents := make([]SwaggerContent, len(contents))
+	// Convert contents to response format with access counts
+	contentResponses := make([]*models.ContentWithAccess, len(contents))
 	for i, content := range contents {
 		// Get access count for each content item
 		accessCount := h.storage.GetAccessCount(content.ID)
-		contentWithAccess := &models.ContentWithAccess{
+		contentResponses[i] = &models.ContentWithAccess{
 			Content:     content,
 			AccessCount: accessCount,
 		}
-		swaggerContents[i] = toSwaggerContentWithAccess(contentWithAccess)
 	}
 
 	// Get total count with the same filter for pagination metadata
 	total := h.storage.CountWithFilter(filter)
 
 	response := map[string]interface{}{
-		"contents": swaggerContents,
+		"contents": contentResponses,
 		"total":    total,
 		"limit":    limit,
 		"offset":   offset,
