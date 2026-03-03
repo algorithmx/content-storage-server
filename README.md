@@ -1,43 +1,26 @@
 # Content Storage Server
 
-A high-performance, enterprise-grade content storage server built with Go, featuring BadgerDB storage, emergency shutdown capabilities, and comprehensive management tools.
+High-performance content storage with BadgerDB, async REST API, emergency recovery, and real-time monitoring.
 
-**[📖 On-boarding Guide](ONBOARDING.md)** - New developers should start here!
-
-## 🚀 Key Features
-
-- **Asynchronous REST API** - HTTP 202 responses with status verification endpoints
-- **BadgerDB Backend** - Fast, embedded LSM-tree key-value store with ACID properties
-- **Sequential Write Queue** - Ensures data consistency and supports emergency recovery
-- **Emergency Shutdown** - Catastrophic failure handling with queue serialization and recovery
-- **Authentication & Security** - API key auth, IP allowlisting, TLS/HTTPS support
-- **Rate Limiting** - Multi-layer throttling with configurable limits
-- **Real-time Management** - Web dashboard with live metrics and queue monitoring
-- **Comprehensive Testing** - Functional, stress, and emergency shutdown test suites
-
-## 🏃 Quick Start
+## Quick Start
 
 ### Prerequisites
 - Go 1.24 or later
 
-### Installation & Setup
+### Install & Run
 
 ```bash
-# Clone and build
 git clone <repository-url>
 cd content-storage-server
 go mod download
 go build -o server ./cmd/server
-
-# Run the server
 ./server
 ```
 
 ### Access Points
-- **Management Dashboard**: http://localhost:8081/ (or http://localhost:8081/static/index.html)
-- **API Documentation**: http://localhost:8081/swagger/index.html
-- **Health Check**: http://localhost:8081/health
-- **Detailed Health**: http://localhost:8081/health/detailed
+- **Dashboard**: http://localhost:8081/
+- **API Docs**: http://localhost:8081/swagger/index.html
+- **Health**: http://localhost:8081/health
 
 ### Basic Usage
 
@@ -57,228 +40,138 @@ curl http://localhost:8081/api/v1/content/example-1
 curl "http://localhost:8081/api/v1/content/?limit=10&offset=0"
 ```
 
-## 🔄 Asynchronous Storage
+## Key Features
 
-Content storage is asynchronous for performance and emergency safety:
+- **Async REST API** - HTTP 202 responses with status verification
+- **BadgerDB Storage** - Fast, embedded, ACID-compliant key-value store
+- **Sequential Write Queue** - Data consistency with emergency recovery
+- **Emergency Shutdown** - Queue preservation and automatic restoration
+- **Security** - API key auth, IP allowlisting, TLS/HTTPS
+- **Rate Limiting** - Multi-layer throttling with configurable limits
+- **Management Dashboard** - Real-time metrics and queue monitoring
+- **Health Monitoring** - Adaptive health checks with detailed status
 
-1. **POST** returns **HTTP 202 Accepted** immediately after queuing
-2. Content is processed sequentially and persisted to disk
-3. Use **GET /api/v1/content/{id}/status** to verify storage completion
+## Asynchronous Storage
+
+Content storage is async for performance and safety:
+
+1. **POST** returns **HTTP 202 Accepted** immediately
+2. Content is processed sequentially and persisted
+3. Use **GET /api/v1/content/{id}/status** to verify completion
 4. During emergency shutdown, queued content is serialized and restored on restart
 
 **Status Values:** `queued` | `stored` | `not_found`
 
-## 📚 API Endpoints
+## API Endpoints
 
 ### Content Management
-- `POST /api/v1/content/` - Store content (HTTP 202 - queued)
-- `GET /api/v1/content/` - List content with pagination
-- `GET /api/v1/content/{id}` - Get content with access tracking
-- `GET /api/v1/content/{id}/status` - Check storage status
-- `DELETE /api/v1/content/{id}` - Delete content
-- `GET /api/v1/content/count` - Get total count
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/v1/content/` | Store content (HTTP 202) |
+| GET | `/api/v1/content/` | List content with pagination |
+| GET | `/api/v1/content/{id}` | Get content with access tracking |
+| GET | `/api/v1/content/{id}/status` | Check storage status |
+| DELETE | `/api/v1/content/{id}` | Delete content |
+| GET | `/api/v1/content/count` | Get total count |
 
 ### System Management
-- `GET /health` - Basic health check with storage connectivity
-- `GET /health/detailed` - Comprehensive health with adaptive status codes (200/206/503)
-- `GET /api/v1/metrics` - System metrics including queue performance and health status
-- `POST /api/v1/sync` - Manual queue flush and database synchronization
-- `POST /api/v1/backup` - Create manual backup with comprehensive monitoring
-- `POST /api/v1/gc` - Trigger garbage collection with performance tracking
-- `POST /api/v1/cleanup` - Cleanup access trackers to prevent memory leaks
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/health` | Basic health check |
+| GET | `/health/detailed` | Comprehensive health (200/206/503) |
+| GET | `/api/v1/metrics` | System metrics and queue stats |
+| POST | `/api/v1/sync` | Manual queue flush |
+| POST | `/api/v1/backup` | Create manual backup |
+| POST | `/api/v1/gc` | Trigger garbage collection |
+| POST | `/api/v1/cleanup` | Cleanup access trackers |
 
 ### Interface
 - `GET /` - Management dashboard
 - `GET /swagger/*` - API documentation
 
-## ⚙️ Configuration
+## Configuration
 
-Configure via environment variables or `.env` file:
+Configure via environment variables or `.env` file.
 
 ### Core Settings
-- `PORT=8081` - HTTP server port
-- `HOST=0.0.0.0` - Server bind address
-- `DATA_DIR=./data` - Database directory
-- `BACKUP_DIR=./backups` - Backup directory
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 8081 | HTTP server port |
+| `HOST` | 0.0.0.0 | Server bind address |
+| `DATA_DIR` | ./data | Database directory |
+| `BACKUP_DIR` | ./backups | Backup directory |
 
 ### Security
-- `ENABLE_AUTH=false` - API key authentication
-- `API_KEY=""` - Authentication key
-- `ALLOWED_IPS=""` - IP allowlist (comma-separated)
-- `ENABLE_TLS=false` - HTTPS with automatic TLS
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ENABLE_AUTH` | true | API key authentication |
+| `API_KEY` | "" | Authentication key (required if auth enabled) |
+| `ALLOWED_IPS` | "" | IP allowlist (comma-separated) |
+| `ENABLE_TLS` | false | HTTPS with automatic TLS |
 
 ### Performance
-- `THROTTLE_LIMIT=100` - Max concurrent requests
-- `MAX_CONTENT_SIZE=10485760` - Max content size (10MB)
-- `WRITE_QUEUE_BATCH_SIZE=10` - Queue batch size
-- `WRITE_QUEUE_BATCH_TIMEOUT=100ms` - Batch timeout
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `THROTTLE_LIMIT` | 100 | Max concurrent requests |
+| `MAX_CONTENT_SIZE` | 10485760 | Max content size (10MB) |
+| `WRITE_QUEUE_BATCH_SIZE` | 10 | Queue batch size |
+| `WRITE_QUEUE_BATCH_TIMEOUT` | 100ms | Batch timeout |
 
 ### Emergency Shutdown
-- `SHUTDOWN_TIMEOUT=30s` - Graceful shutdown timeout
-- `EMERGENCY_TIMEOUT=5s` - Emergency shutdown timeout
-- `ENABLE_EMERGENCY_RECOVERY=true` - Auto-recovery on startup
-- `EMERGENCY_RECOVERY_DIR=backups/emergency-recovery` - Recovery directory
-
-### Maintenance
-- `BACKUP_INTERVAL=6h` - Auto-backup frequency
-- `GC_INTERVAL=30m` - Garbage collection frequency
-- `MAX_BACKUPS=10` - Backup retention count
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SHUTDOWN_TIMEOUT` | 30s | Graceful shutdown timeout |
+| `EMERGENCY_TIMEOUT` | 5s | Emergency shutdown timeout |
+| `ENABLE_EMERGENCY_RECOVERY` | true | Auto-recovery on startup |
 
 See `pkg/config/config.go` for complete options.
 
-## 🖥️ Management Interface
+## Testing
 
-Web dashboard at `http://localhost:8081/` provides:
-
-- **Real-time Monitoring** - Server status, uptime, content count, queue depth
-- **System Metrics** - Database size, backup statistics, performance data
-- **Content Management** - Browse and manage stored content with pagination
-- **Operations** - Trigger sync, backups, garbage collection
-- **Auto-refresh** - 30-second updates, responsive design
-
-## 🧪 Testing
-
-### Unit Tests
 ```bash
-go test ./...                    # All tests
-go test -cover ./...             # With coverage
-go test ./pkg/storage/...        # Storage tests
-```
+# Unit tests
+go test ./...
 
-### Functional Testing
-```bash
+# With coverage
+go test -cover ./...
+
+# Functional tests
 cd cmd/functional-test
 go run main.go                   # Basic validation
 go run main.go --test-status     # Test async functionality
 go run main.go --test-shutdown   # Test emergency shutdown
-go run main.go --users 50        # Performance testing
-```
 
-### Emergency Shutdown Tests
-```bash
-go test ./pkg/storage -run "Test.*Emergency" -v
-```
-
-### Stress Testing
-```bash
+# Stress tests
 cd cmd/stress-test
 go run main.go -duration=60s -users=100
 ```
 
-## 🏗️ Architecture
+## Production Checklist
 
-### Storage Layer
-- **BadgerDB** - Embedded LSM-tree key-value store with ACID properties
-- **Write Queue** - Sequential processing with batching and emergency serialization
-- **Emergency Recovery** - Queue state preservation and automatic restoration
-- **Access Manager** - Atomic access count tracking with CountedSyncMap
-
-### API Layer
-- **Echo Framework** - High-performance HTTP router with middleware
-- **Asynchronous Handlers** - Content management with status tracking
-- **Health Monitoring** - Adaptive health checks with detailed system information
-- **Swagger Integration** - Automatic API documentation
-
-### Queue System
-- **Sequential Processing** - Ensures data consistency, prevents race conditions
-- **Batch Processing** - Configurable batch size and timeout
-- **Emergency Serialization** - Preserves pending operations during failures
-- **Recovery Mechanism** - Automatic detection and restoration of emergency backups
-
-## 🚨 Emergency Shutdown
-
-### Shutdown Types
-- **Graceful** (single Ctrl+C): Waits for pending operations (30s timeout)
-- **Emergency** (double Ctrl+C or SIGUSR1): Immediate shutdown with queue preservation (5s timeout)
-
-### Emergency Process
-1. **Immediate Queue Stop** - Terminates worker without waiting
-2. **Queue Serialization** - Saves pending items and write queue to JSON
-3. **Recovery Metadata** - Records shutdown info for automatic recovery
-
-### Recovery
-- **Automatic** - Server detects and restores emergency files on startup
-- **File Structure** - `backups/emergency-recovery/` with timestamped files
-- **Archival** - Processed files moved to `processed/` subdirectory
-
-### Usage
-```bash
-# Normal shutdown
-kill -TERM <pid>
-
-# Emergency shutdown
-kill -USR1 <pid>
-# OR double Ctrl+C within 3 seconds
-```
-
-## 🚨 Production Considerations
-
-### Security Checklist
+### Security
 - [ ] Enable authentication (`ENABLE_AUTH=true`)
 - [ ] Set strong API key (`API_KEY`)
 - [ ] Configure IP allowlisting (`ALLOWED_IPS`)
 - [ ] Enable HTTPS (`ENABLE_TLS=true`)
 - [ ] Set content size limits (`MAX_CONTENT_SIZE`)
 
-### Performance Tuning
+### Performance
 - Enable `PERFORMANCE_MODE=true` for high-throughput
 - Adjust `WRITE_QUEUE_BATCH_SIZE` and `WRITE_QUEUE_BATCH_TIMEOUT`
 - Configure `THROTTLE_LIMIT` based on expected load
-- Set `GC_INTERVAL` based on data patterns
 
 ### Monitoring
-- Monitor `/health/detailed` for adaptive system health
+- Monitor `/health/detailed` for system health
 - Use `/api/v1/metrics` for operational metrics
-- Watch emergency shutdown logs and queue depth
-- Set up backup verification and retention monitoring
+- Watch queue depth and emergency shutdown logs
 
-## 📊 Metrics & Monitoring
+## Documentation
 
-### Available Metrics (`/api/v1/metrics`)
-- **Content Statistics** - Total count, database size
-- **Performance** - Request rates, response times, throughput
-- **Storage Health** - Database health, disk usage
-- **Queue Metrics** - Write queue depth, processing rate, batch statistics
-- **System Health** - Overall status (healthy/degraded/unhealthy)
-
-### Health Status Codes (`/health/detailed`)
-- **200 OK** - All systems healthy
-- **206 Partial Content** - System degraded but functional
-- **503 Service Unavailable** - System unhealthy
-
-### Example Response
-```json
-{
-  "content_count": 1250,
-  "database_size_bytes": 52428800,
-  "health_status": "healthy",
-  "queue_depth": 3,
-  "queue_processing_rate": 45.2
-}
-```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Add comprehensive tests for new functionality
-4. Ensure all tests pass (`go test ./...`)
-5. Submit a pull request
-
-## 📞 Support & Resources
-
-### Documentation
-- **[On-boarding Guide](ONBOARDING.md)** - Comprehensive developer onboarding
+- **[Developer Guide](docs/developer-guide.md)** - Architecture, development workflow, troubleshooting
 - **[Storage Module](pkg/storage/README.md)** - Storage layer documentation
 - **[Handlers](internal/handlers/README.md)** - API handler documentation
 - **[Management Interface](static/README.md)** - Dashboard documentation
 
-### Endpoints
-- **API Documentation**: http://localhost:8081/swagger/index.html
-- **Management Interface**: http://localhost:8081/
-- **Health Monitoring**: http://localhost:8081/health/detailed
-- **System Metrics**: http://localhost:8081/api/v1/metrics
+## License
 
-## 📄 License
-
-MIT License - see LICENSE file for details.
+MIT License
