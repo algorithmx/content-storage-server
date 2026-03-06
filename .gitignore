@@ -38,3 +38,5 @@ KEYREGISTRY
 MANIFEST
 
 Makefile
+# Server binary
+content-storage-server
