@@ -199,6 +199,15 @@ func (h *ContentHandler) GetContent(c echo.Context) error {
 				Data:    map[string]string{"error": err.Error()},
 			})
 		}
+		if err == storage.ErrContentExpired {
+			// Content has expired (time-based or access limit reached)
+			// Return 410 Gone for expired content as per API spec
+			return c.JSON(http.StatusGone, models.StorageResponse{
+				Success: false,
+				Message: "Content has expired",
+				Data:    map[string]string{"error": err.Error()},
+			})
+		}
 		h.logError("Failed to retrieve content", zap.String("id", id), zap.Error(err))
 		return c.JSON(http.StatusInternalServerError, models.StorageResponse{
 			Success: false,
@@ -580,7 +589,7 @@ func (h *ContentHandler) GetContentStatus(c echo.Context) error {
 	}
 
 	// Check if content exists in storage (persisted)
-	_, err := h.storage.Get(id)
+	_, err := h.storage.GetReadOnly(id)
 	if err != nil {
 		if err == storage.ErrContentNotFound {
 			return c.JSON(http.StatusNotFound, models.StorageResponse{
