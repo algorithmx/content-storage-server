@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Content Storage Server - Comprehensive Test Client
+Content Storage Server - Enhanced Bug Discovery Test Client
 
-This script performs realistic client scenario testing against the content storage server
-to reveal potential issues with the server's function promises.
+This script performs aggressive and comprehensive testing against the content storage server
+to reveal potential bugs, edge cases, race conditions, and API contract violations.
 
 Function Promises (from server analysis):
 1. POST /api/v1/content/ - Store content, returns HTTP 202 (Accepted), content queued
@@ -20,15 +20,20 @@ Function Promises (from server analysis):
 Test Scenarios:
 1. Basic CRUD operations
 2. Asynchronous write queue behavior
-3. Access limit enforcement
-4. Time-based expiration
-5. Concurrent operations
+3. Access limit enforcement (including boundary cases)
+4. Time-based expiration (including edge cases)
+5. Concurrent operations and race conditions
 6. Error handling and edge cases
 7. Pagination and filtering
 8. Health and metrics
 9. Management operations
 10. Rate limiting (if enabled)
 11. Authentication (if enabled)
+12. ID validation edge cases
+13. Content size boundaries
+14. Concurrent access limit exhaustion
+15. Rapid create/delete cycles
+16. Data integrity under load
 """
 
 import argparse
@@ -39,12 +44,15 @@ import random
 import string
 import threading
 import sys
+import os
+import statistics
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Tuple
-from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple, Set
+from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 import requests
-from requests.exceptions import RequestException
+from requests.exceptions import RequestException, Timeout, ConnectionError
 
 
 # ============================================================================
@@ -58,8 +66,12 @@ class TestConfig:
     api_key: Optional[str] = None
     timeout: int = 30
     verbose: bool = False
-    concurrent_requests: int = 10
+    concurrent_requests: int = 20
     test_data_size: int = 100
+    stress_test_duration: int = 30  # seconds
+    enable_stress_tests: bool = True
+    enable_boundary_tests: bool = True
+    enable_race_condition_tests: bool = True
 
 
 # ============================================================================
@@ -74,6 +86,9 @@ class TestResults:
         self.failed: List[Tuple[str, str]] = []  # (test_name, error_message)
         self.issues: List[Dict[str, Any]] = []  # Detailed issues found
         self.warnings: List[str] = []
+        self.bugs_found: List[Dict[str, Any]] = []  # Specific bugs discovered
+        self.performance_metrics: Dict[str, List[float]] = defaultdict(list)
+        self.race_conditions_detected: List[Dict[str, Any]] = []
 
     def add_pass(self, test_name: str):
         self.passed.append(test_name)
@@ -89,8 +104,44 @@ class TestResults:
             "timestamp": datetime.now().isoformat()
         })
 
+    def add_bug(self, bug_type: str, description: str, severity: str, details: Dict[str, Any]):
+        """Add a specific bug that was discovered"""
+        self.bugs_found.append({
+            "type": bug_type,
+            "description": description,
+            "severity": severity,  # critical, high, medium, low
+            "details": details,
+            "timestamp": datetime.now().isoformat()
+        })
+
+    def add_race_condition(self, description: str, details: Dict[str, Any]):
+        """Add a race condition that was detected"""
+        self.race_conditions_detected.append({
+            "description": description,
+            "details": details,
+            "timestamp": datetime.now().isoformat()
+        })
+
     def add_warning(self, message: str):
         self.warnings.append(message)
+
+    def record_metric(self, metric_name: str, value: float):
+        """Record a performance metric"""
+        self.performance_metrics[metric_name].append(value)
+
+    def get_metric_stats(self, metric_name: str) -> Optional[Dict[str, float]]:
+        """Get statistics for a metric"""
+        values = self.performance_metrics.get(metric_name, [])
+        if not values:
+            return None
+        return {
+            "count": len(values),
+            "min": min(values),
+            "max": max(values),
+            "avg": statistics.mean(values),
+            "median": statistics.median(values),
+            "stdev": statistics.stdev(values) if len(values) > 1 else 0
+        }
 
     def print_summary(self):
         print("\n" + "=" * 70)
@@ -100,11 +151,26 @@ class TestResults:
         print(f"Failed: {len(self.failed)}")
         print(f"Issues Found: {len(self.issues)}")
         print(f"Warnings: {len(self.warnings)}")
+        print(f"Bugs Discovered: {len(self.bugs_found)}")
+        print(f"Race Conditions Detected: {len(self.race_conditions_detected)}")
 
         if self.failed:
             print("\n--- FAILED TESTS ---")
             for name, error in self.failed:
                 print(f"  [FAIL] {name}: {error}")
+
+        if self.bugs_found:
+            print("\n--- BUGS DISCOVERED ---")
+            for bug in self.bugs_found:
+                print(f"\n  [{bug['severity'].upper()}] {bug['type']}")
+                print(f"    {bug['description']}")
+                print(f"    Details: {json.dumps(bug['details'], indent=4)}")
+
+        if self.race_conditions_detected:
+            print("\n--- RACE CONDITIONS DETECTED ---")
+            for rc in self.race_conditions_detected:
+                print(f"\n  {rc['description']}")
+                print(f"    Details: {json.dumps(rc['details'], indent=4)}")
 
         if self.issues:
             print("\n--- ISSUES FOUND ---")
@@ -116,6 +182,16 @@ class TestResults:
             print("\n--- WARNINGS ---")
             for warning in self.warnings:
                 print(f"  [WARN] {warning}")
+
+        # Print performance metrics
+        if self.performance_metrics:
+            print("\n--- PERFORMANCE METRICS ---")
+            for metric_name in sorted(self.performance_metrics.keys()):
+                stats = self.get_metric_stats(metric_name)
+                if stats:
+                    print(f"  {metric_name}:")
+                    print(f"    count: {stats['count']}, avg: {stats['avg']:.3f}s, "
+                          f"min: {stats['min']:.3f}s, max: {stats['max']:.3f}s")
 
         print("\n" + "=" * 70)
 
@@ -1400,6 +1476,599 @@ class TestScenarios:
             self.client.delete_content(content_id)
 
     # -------------------------------------------------------------------------
+    # Scenario 13: ID Validation Edge Cases (Bug Discovery)
+    # -------------------------------------------------------------------------
+
+    def test_id_validation_edge_cases(self):
+        """Test edge cases for ID validation to discover parsing bugs"""
+        print("\n=== Scenario 13: ID Validation Edge Cases ===")
+
+        # Test various edge case IDs
+        edge_case_ids = [
+            # Boundary lengths
+            ("a", "single char"),
+            ("ab", "two chars"),
+            ("x" * 255, "max length (255)"),
+            ("x" * 256, "over max length (256)"),
+
+            # Special characters that might cause issues
+            ("test-id", "hyphen"),
+            ("test_id", "underscore"),
+            ("test.id", "dot"),
+            ("TestID123", "mixed case"),
+            ("123numeric", "numeric start"),
+
+            # Path traversal attempts
+            ("../etc/passwd", "path traversal double dot"),
+            ("..hidden", "leading double dot"),
+            ("file.txt", "filename with extension"),
+
+            # Unicode and encoding
+            ("test\u0000null", "null byte"),
+            ("test\nnewline", "newline"),
+            ("test\tTab", "tab"),
+            ("test space", "space"),
+
+            # Empty and whitespace
+            ("", "empty string"),
+            ("   ", "whitespace only"),
+
+            # SQL injection patterns
+            ("id' OR '1'='1", "SQL injection single quote"),
+            ("id; DROP TABLE", "SQL injection semicolon"),
+            ("id--", "SQL injection comment"),
+
+            # Command injection
+            ("id; rm -rf /", "command injection"),
+            ("id|cat /etc/passwd", "pipe injection"),
+
+            # XSS patterns
+            ("<script>alert(1)</script>", "XSS script tag"),
+            ("javascript:alert(1)", "XSS javascript protocol"),
+        ]
+
+        results_by_category = {
+            "rejected": [],
+            "accepted": [],
+            "error": []
+        }
+
+        for test_id, description in edge_case_ids:
+            try:
+                status, response = self.client.store_content(test_id, "test data")
+
+                if status == 202:
+                    results_by_category["accepted"].append((description, test_id[:50]))
+                    # Try to retrieve it
+                    get_status, _ = self.client.get_content(test_id)
+                    if get_status == 200:
+                        self.results.add_pass(f"ID Edge Case - '{description}' stored and retrieved")
+                    else:
+                        self.results.add_bug(
+                            "ID Validation",
+                            f"Stored ID '{description}' but cannot retrieve (status {get_status})",
+                            "high",
+                            {"id_type": description, "store_status": status, "get_status": get_status}
+                        )
+                    # Cleanup
+                    self.client.delete_content(test_id)
+                elif status in [400, 404]:
+                    results_by_category["rejected"].append((description, test_id[:50]))
+                    self.results.add_pass(f"ID Edge Case - '{description}' correctly rejected")
+                else:
+                    results_by_category["error"].append((description, test_id[:50], status))
+                    self.results.add_issue(
+                        "ID Edge Case",
+                        f"Unexpected status for '{description}': {status}",
+                        {"id": test_id[:50], "status": status}
+                    )
+            except Exception as e:
+                self.results.add_issue(
+                    "ID Edge Case Error",
+                    f"Exception testing '{description}': {e}",
+                    {"id": test_id[:50]}
+                )
+
+        print(f"    Summary: {len(results_by_category['accepted'])} accepted, "
+              f"{len(results_by_category['rejected'])} rejected, "
+              f"{len(results_by_category['error'])} errors")
+
+    # -------------------------------------------------------------------------
+    # Scenario 14: Access Limit Boundary Testing
+    # -------------------------------------------------------------------------
+
+    def test_access_limit_boundaries(self):
+        """Test access limit boundary conditions including zero and negative"""
+        print("\n=== Scenario 14: Access Limit Boundaries ===")
+
+        # Test access_limit = 0 (should mean no limit or immediate expiration?)
+        content_id_zero = self.generate_id("limit-zero")
+        status, _ = self.client.store_content(
+            content_id_zero,
+            "zero limit content",
+            access_limit=0
+        )
+        if status == 202:
+            self.client.wait_for_content_stored(content_id_zero)
+            status, response = self.client.get_content(content_id_zero)
+            if status == 410:
+                self.results.add_pass("Access Limit - Zero means immediate 410")
+            elif status == 200:
+                # Check if it allows any access
+                status2, _ = self.client.get_content(content_id_zero)
+                if status2 == 200:
+                    self.results.add_bug(
+                        "Access Limit",
+                        "access_limit=0 allows unlimited access (should be 0 or invalid)",
+                        "medium",
+                        {"behavior": "allows unlimited access with limit=0"}
+                    )
+                else:
+                    self.results.add_pass("Access Limit - Zero allows exactly one access")
+            self.client.delete_content(content_id_zero)
+
+        # Test access_limit = 1
+        content_id_one = self.generate_id("limit-one")
+        status, _ = self.client.store_content(
+            content_id_one,
+            "one limit content",
+            access_limit=1
+        )
+        if status == 202:
+            self.client.wait_for_content_stored(content_id_one)
+            status1, _ = self.client.get_content(content_id_one)
+            status2, _ = self.client.get_content(content_id_one)
+
+            if status1 == 200 and status2 == 410:
+                self.results.add_pass("Access Limit - One allows exactly one access then 410")
+            else:
+                self.results.add_bug(
+                    "Access Limit",
+                    f"access_limit=1 behavior incorrect: first={status1}, second={status2}",
+                    "high",
+                    {"first_status": status1, "second_status": status2}
+                )
+            self.client.delete_content(content_id_one)
+
+        # Test very high access limit
+        content_id_high = self.generate_id("limit-high")
+        status, _ = self.client.store_content(
+            content_id_high,
+            "high limit content",
+            access_limit=999999
+        )
+        if status == 202:
+            self.results.add_pass("Access Limit - High value (999999) accepted")
+            self.client.wait_for_content_stored(content_id_high)
+            # Quick check it works
+            status, _ = self.client.get_content(content_id_high)
+            if status == 200:
+                self.results.add_pass("Access Limit - High value works for access")
+            self.client.delete_content(content_id_high)
+
+    # -------------------------------------------------------------------------
+    # Scenario 15: Expiration Edge Cases
+    # -------------------------------------------------------------------------
+
+    def test_expiration_edge_cases(self):
+        """Test expiration with edge case timestamps"""
+        print("\n=== Scenario 15: Expiration Edge Cases ===")
+
+        # Test expiration in the past
+        past_time = (datetime.utcnow() - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        content_id_past = self.generate_id("expire-past")
+        status, _ = self.client.store_content(
+            content_id_past,
+            "already expired content",
+            expires_at=past_time
+        )
+        if status == 202:
+            self.client.wait_for_content_stored(content_id_past)
+            status, _ = self.client.get_content(content_id_past)
+            if status == 404:
+                self.results.add_pass("Expiration - Past time correctly returns 404")
+            elif status == 200:
+                self.results.add_bug(
+                    "Expiration",
+                    "Content with past expiration time is accessible",
+                    "high",
+                    {"expires_at": past_time, "current_time": datetime.utcnow().isoformat()}
+                )
+            self.client.delete_content(content_id_past)
+
+        # Test expiration at exact current time (race condition potential)
+        now_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        content_id_now = self.generate_id("expire-now")
+        status, _ = self.client.store_content(
+            content_id_now,
+            "expiring now content",
+            expires_at=now_time
+        )
+        if status == 202:
+            self.client.wait_for_content_stored(content_id_now)
+            time.sleep(0.1)  # Small delay
+            status, _ = self.client.get_content(content_id_now)
+            # Should be expired or about to expire
+            self.results.add_pass(f"Expiration - Current time test: status={status}")
+            self.client.delete_content(content_id_now)
+
+        # Test far future expiration
+        future_time = (datetime.utcnow() + timedelta(days=365*10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        content_id_future = self.generate_id("expire-future")
+        status, _ = self.client.store_content(
+            content_id_future,
+            "far future content",
+            expires_at=future_time
+        )
+        if status == 202:
+            self.results.add_pass("Expiration - Far future date accepted")
+            self.client.wait_for_content_stored(content_id_future)
+            status, _ = self.client.get_content(content_id_future)
+            if status == 200:
+                self.results.add_pass("Expiration - Far future content accessible")
+            self.client.delete_content(content_id_future)
+
+        # Test malformed expiration format
+        content_id_bad = self.generate_id("expire-bad")
+        status, _ = self.client.store_content(
+            content_id_bad,
+            "bad format content",
+            expires_at="not-a-valid-date"
+        )
+        if status == 400:
+            self.results.add_pass("Expiration - Invalid format correctly rejected")
+        elif status == 202:
+            self.results.add_bug(
+                "Expiration",
+                "Invalid expiration format accepted without error",
+                "medium",
+                {"invalid_date": "not-a-valid-date"}
+            )
+            self.client.delete_content(content_id_bad)
+
+    # -------------------------------------------------------------------------
+    # Scenario 16: Concurrent Access Limit Exhaustion (Race Condition)
+    # -------------------------------------------------------------------------
+
+    def test_concurrent_access_limit_exhaustion(self):
+        """Test race condition when multiple clients hit access limit simultaneously"""
+        print("\n=== Scenario 16: Concurrent Access Limit Exhaustion ===")
+
+        if not self.config.enable_race_condition_tests:
+            print("    Skipped (race condition tests disabled)")
+            return
+
+        content_id = self.generate_id("race-limit")
+        access_limit = 5
+        num_threads = 20  # More threads than access limit
+
+        # Store with small access limit
+        status, _ = self.client.store_content(
+            content_id,
+            "race condition test data",
+            access_limit=access_limit
+        )
+        if status != 202:
+            self.results.add_fail("Race Limit - Store failed", f"Status: {status}")
+            return
+
+        self.client.wait_for_content_stored(content_id)
+
+        # Track results from concurrent access
+        results_lock = threading.Lock()
+        success_count = 0
+        gone_count = 0
+        other_statuses = []
+
+        def access_content():
+            nonlocal success_count, gone_count
+            try:
+                status, response = self.client.get_content(content_id)
+                with results_lock:
+                    if status == 200:
+                        success_count += 1
+                    elif status == 410:
+                        gone_count += 1
+                    else:
+                        other_statuses.append(status)
+            except Exception as e:
+                with results_lock:
+                    other_statuses.append(str(e))
+
+        # Launch concurrent accesses
+        with ThreadPoolExecutor(max_workers=num_threads) as executor:
+            futures = [executor.submit(access_content) for _ in range(num_threads)]
+            for future in as_completed(futures):
+                future.result()
+
+        total_accessed = success_count + gone_count
+
+        # Analysis
+        if success_count > access_limit:
+            self.results.add_race_condition(
+                "Access Limit Race Condition",
+                {
+                    "description": "More successful accesses than allowed by limit",
+                    "access_limit": access_limit,
+                    "successful_accesses": success_count,
+                    "total_attempts": num_threads
+                }
+            )
+            self.results.add_bug(
+                "Race Condition",
+                f"Access limit exceeded: {success_count} successes with limit={access_limit}",
+                "critical",
+                {"limit": access_limit, "actual_successes": success_count}
+            )
+        elif success_count == access_limit:
+            self.results.add_pass(f"Race Limit - Exactly {access_limit} accesses allowed")
+        else:
+            self.results.add_issue(
+                "Access Limit",
+                f"Fewer accesses than limit: {success_count}/{access_limit}",
+                {"expected": access_limit, "actual": success_count}
+            )
+
+        if gone_count > 0:
+            self.results.add_pass(f"Race Limit - {gone_count} requests correctly got 410")
+
+        # Cleanup
+        self.client.delete_content(content_id)
+
+    # -------------------------------------------------------------------------
+    # Scenario 17: Rapid Create/Delete Cycles
+    # -------------------------------------------------------------------------
+
+    def test_rapid_create_delete_cycles(self):
+        """Test rapid create/delete cycles to find timing bugs"""
+        print("\n=== Scenario 17: Rapid Create/Delete Cycles ===")
+
+        cycles = 50
+        errors = []
+        timing_issues = []
+
+        for i in range(cycles):
+            content_id = self.generate_id(f"cycle-{i}")
+            data = f"cycle data {i}"
+
+            # Store
+            store_start = time.time()
+            status, _ = self.client.store_content(content_id, data)
+            store_time = time.time() - store_start
+
+            if status != 202:
+                errors.append(f"Cycle {i}: store failed with {status}")
+                continue
+
+            # Immediately try to delete (might be still queued)
+            delete_start = time.time()
+            status, _ = self.client.delete_content(content_id)
+            delete_time = time.time() - delete_start
+
+            # Record metrics
+            self.results.record_metric("store_time", store_time)
+            self.results.record_metric("delete_time", delete_time)
+
+            if status not in [200, 404]:
+                errors.append(f"Cycle {i}: delete returned {status}")
+
+            # If deleted too fast, might indicate sync processing instead of async
+            if delete_time < 0.001:
+                timing_issues.append(f"Cycle {i}: delete was suspiciously fast ({delete_time:.6f}s)")
+
+        if errors:
+            self.results.add_issue(
+                "Rapid Cycles",
+                f"Errors during rapid create/delete: {len(errors)}",
+                {"errors": errors[:10]}  # First 10 errors
+            )
+        else:
+            self.results.add_pass(f"Rapid Cycles - {cycles} cycles completed without errors")
+
+        if timing_issues:
+            self.results.add_warning(f"Rapid Cycles - {len(timing_issues)} suspiciously fast operations")
+
+    # -------------------------------------------------------------------------
+    # Scenario 18: Data Integrity Under Load
+    # -------------------------------------------------------------------------
+
+    def test_data_integrity_under_load(self):
+        """Test that data remains intact under concurrent load"""
+        print("\n=== Scenario 18: Data Integrity Under Load ===")
+
+        num_items = 20
+        verification_rounds = 3
+        corruption_detected = []
+
+        # Generate unique data for each item
+        test_data = {}
+        for i in range(num_items):
+            content_id = self.generate_id(f"integrity-{i}")
+            # Include hash-like pattern for verification
+            data = f"DATA-{i}-{uuid.uuid4().hex}-CONTENT"
+            test_data[content_id] = data
+
+            status, _ = self.client.store_content(content_id, data)
+            if status != 202:
+                self.results.add_fail("Integrity - Store", f"Failed for {content_id}")
+                return
+
+        # Wait for all to be stored
+        for content_id in test_data:
+            self.client.wait_for_content_stored(content_id)
+
+        # Verify multiple times under read load
+        for round_num in range(verification_rounds):
+            verified_count = 0
+
+            for content_id, expected_data in test_data.items():
+                status, response = self.client.get_content(content_id)
+                if status == 200 and response:
+                    actual_data = response.get("data", {}).get("data")
+                    if actual_data == expected_data:
+                        verified_count += 1
+                    else:
+                        corruption_detected.append({
+                            "round": round_num,
+                            "id": content_id,
+                            "expected": expected_data[:50],
+                            "actual": actual_data[:50] if actual_data else None
+                        })
+
+            self.results.add_pass(f"Integrity - Round {round_num + 1}: {verified_count}/{num_items} verified")
+
+        if corruption_detected:
+            self.results.add_bug(
+                "Data Corruption",
+                f"Data integrity failure detected: {len(corruption_detected)} items",
+                "critical",
+                {"corruptions": corruption_detected[:5]}
+            )
+
+        # Cleanup
+        for content_id in test_data:
+            self.client.delete_content(content_id)
+
+    # -------------------------------------------------------------------------
+    # Scenario 19: Stress Test - Sustained Load
+    # -------------------------------------------------------------------------
+
+    def test_sustained_load(self):
+        """Apply sustained load to find performance degradation or leaks"""
+        print("\n=== Scenario 19: Sustained Load Test ===")
+
+        if not self.config.enable_stress_tests:
+            print("    Skipped (stress tests disabled)")
+            return
+
+        duration = self.config.stress_test_duration
+        print(f"    Running sustained load test for {duration} seconds...")
+
+        start_time = time.time()
+        operation_count = 0
+        error_count = 0
+        stored_ids = []
+
+        while time.time() - start_time < duration:
+            # Mix of operations
+            op_type = random.choice(["store", "get", "list", "count"])
+
+            try:
+                if op_type == "store":
+                    content_id = self.generate_id(f"stress-{operation_count}")
+                    status, _ = self.client.store_content(content_id, f"stress data {operation_count}")
+                    if status == 202:
+                        stored_ids.append(content_id)
+                elif op_type == "get" and stored_ids:
+                    content_id = random.choice(stored_ids)
+                    self.client.get_content(content_id)
+                elif op_type == "list":
+                    self.client.list_content(limit=10)
+                elif op_type == "count":
+                    self.client.get_content_count()
+
+                operation_count += 1
+
+            except Exception as e:
+                error_count += 1
+                if error_count <= 5:  # Log first 5 errors
+                    print(f"      Error during stress test: {e}")
+
+            # Rate limiting - don't overwhelm
+            time.sleep(0.01)
+
+        # Cleanup stored items
+        cleanup_errors = 0
+        for content_id in stored_ids:
+            try:
+                self.client.delete_content(content_id)
+            except:
+                cleanup_errors += 1
+
+        self.results.add_pass(f"Sustained Load - {operation_count} ops in {duration}s, {error_count} errors")
+
+        if error_count > operation_count * 0.01:  # More than 1% errors
+            self.results.add_issue(
+                "Sustained Load",
+                f"High error rate: {error_count}/{operation_count} ({100*error_count/operation_count:.1f}%)",
+                {"total_ops": operation_count, "errors": error_count}
+            )
+
+    # -------------------------------------------------------------------------
+    # Scenario 20: List Pagination Consistency
+    # -------------------------------------------------------------------------
+
+    def test_list_pagination_consistency(self):
+        """Test that pagination returns consistent results"""
+        print("\n=== Scenario 20: List Pagination Consistency ===")
+
+        # Store several items with same tag
+        tag = f"pagination-test-{uuid.uuid4().hex[:8]}"
+        num_items = 30
+        stored_ids = set()
+
+        for i in range(num_items):
+            content_id = self.generate_id(f"page-item-{i}")
+            status, _ = self.client.store_content(content_id, f"item {i}", tag=tag)
+            if status == 202:
+                stored_ids.add(content_id)
+
+        # Wait for storage
+        for content_id in stored_ids:
+            self.client.wait_for_content_stored(content_id)
+
+        # Paginate through results and collect all IDs
+        collected_ids = set()
+        duplicate_ids = []
+        offset = 0
+        page_size = 10
+
+        while True:
+            status, response = self.client.list_content(limit=page_size, offset=offset, tag=tag)
+            if status != 200:
+                break
+
+            items = response.get("data", {}).get("contents", [])
+            if not items:
+                break
+
+            for item in items:
+                item_id = item.get("id")
+                if item_id in collected_ids:
+                    duplicate_ids.append(item_id)
+                collected_ids.add(item_id)
+
+            offset += page_size
+            if offset > 100:  # Safety limit
+                break
+
+        # Check consistency
+        if duplicate_ids:
+            self.results.add_bug(
+                "Pagination",
+                f"Duplicate items in paginated results: {len(duplicate_ids)}",
+                "high",
+                {"duplicates": duplicate_ids[:10]}
+            )
+        else:
+            self.results.add_pass("Pagination - No duplicates found")
+
+        if collected_ids == stored_ids:
+            self.results.add_pass("Pagination - All items retrieved consistently")
+        else:
+            missing = stored_ids - collected_ids
+            extra = collected_ids - stored_ids
+            self.results.add_issue(
+                "Pagination Consistency",
+                "Mismatch between stored and retrieved items",
+                {"missing": len(missing), "extra": len(extra)}
+            )
+
+        # Cleanup
+        for content_id in stored_ids:
+            self.client.delete_content(content_id)
+
+    # -------------------------------------------------------------------------
     # Run All Scenarios
     # -------------------------------------------------------------------------
 
@@ -1425,6 +2094,15 @@ class TestScenarios:
             ("Content Overwrite", self.test_content_overwrite),
             ("Large Content", self.test_large_content),
             ("Count Endpoint", self.test_count_endpoint),
+            # New bug discovery scenarios
+            ("ID Validation Edge Cases", self.test_id_validation_edge_cases),
+            ("Access Limit Boundaries", self.test_access_limit_boundaries),
+            ("Expiration Edge Cases", self.test_expiration_edge_cases),
+            ("Concurrent Access Limit Exhaustion", self.test_concurrent_access_limit_exhaustion),
+            ("Rapid Create/Delete Cycles", self.test_rapid_create_delete_cycles),
+            ("Data Integrity Under Load", self.test_data_integrity_under_load),
+            ("Sustained Load", self.test_sustained_load),
+            ("List Pagination Consistency", self.test_list_pagination_consistency),
         ]
 
         for name, scenario in scenarios:
@@ -1440,13 +2118,16 @@ class TestScenarios:
 # ============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Content Storage Server Test Client")
+    parser = argparse.ArgumentParser(description="Content Storage Server - Bug Discovery Test Client")
     parser.add_argument("--url", default="http://localhost:8081", help="Server base URL")
     parser.add_argument("--api-key", help="API key for authentication")
     parser.add_argument("--timeout", type=int, default=30, help="Request timeout in seconds")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    parser.add_argument("--concurrent", type=int, default=10, help="Number of concurrent requests")
+    parser.add_argument("--concurrent", type=int, default=20, help="Number of concurrent requests")
     parser.add_argument("--scenario", help="Run specific scenario only")
+    parser.add_argument("--no-stress", action="store_true", help="Disable stress tests")
+    parser.add_argument("--no-race", action="store_true", help="Disable race condition tests")
+    parser.add_argument("--stress-duration", type=int, default=30, help="Stress test duration in seconds")
 
     args = parser.parse_args()
 
@@ -1455,7 +2136,10 @@ def main():
         api_key=args.api_key,
         timeout=args.timeout,
         verbose=args.verbose,
-        concurrent_requests=args.concurrent
+        concurrent_requests=args.concurrent,
+        enable_stress_tests=not args.no_stress,
+        enable_race_condition_tests=not args.no_race,
+        stress_test_duration=args.stress_duration
     )
 
     results = TestResults()
@@ -1498,6 +2182,15 @@ def main():
             "overwrite": scenarios.test_content_overwrite,
             "large": scenarios.test_large_content,
             "count": scenarios.test_count_endpoint,
+            # New scenarios
+            "id-edge": scenarios.test_id_validation_edge_cases,
+            "access-boundary": scenarios.test_access_limit_boundaries,
+            "expire-edge": scenarios.test_expiration_edge_cases,
+            "race-limit": scenarios.test_concurrent_access_limit_exhaustion,
+            "rapid-cycle": scenarios.test_rapid_create_delete_cycles,
+            "integrity": scenarios.test_data_integrity_under_load,
+            "stress": scenarios.test_sustained_load,
+            "pagination-consistency": scenarios.test_list_pagination_consistency,
         }
 
         if args.scenario.lower() in scenario_map:

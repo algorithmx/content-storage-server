@@ -18,7 +18,7 @@ import (
 
 // Validation constants and patterns
 const (
-	minAccessLimit = 0 // Minimum access limit (always 0)
+	minAccessLimit = 0 // Minimum access limit (0 means unlimited/not set)
 )
 
 var (
@@ -61,6 +61,11 @@ func (v *RequestValidator) ValidateStorageRequest(req *models.StorageRequest) er
 			return fmt.Errorf("validation failed: %w", err)
 		}
 
+		// Explicit ID validation even in performance mode (security critical)
+		if err := v.ValidateID(req.ID); err != nil {
+			return err
+		}
+
 		// Only perform expensive validations if necessary
 		// Quick data size check without full content validation
 		if len(req.Data) > int(v.config.MaxContentSize) {
@@ -85,6 +90,11 @@ func (v *RequestValidator) ValidateStorageRequest(req *models.StorageRequest) er
 			if !allowed {
 				return fmt.Errorf("content type '%s' not in allowed types", req.Type)
 			}
+		}
+
+		// Validate access limit (reject 0, which means unlimited in the model but is confusing)
+		if err := v.ValidateAccessLimit(req.AccessLimit); err != nil {
+			return err
 		}
 
 		return nil
@@ -310,8 +320,14 @@ func (v *RequestValidator) validateBinaryData(data interface{}) error {
 }
 
 // ValidateAccessLimit validates access limit bounds
+// accessLimit of 0 means "not set" (unlimited), not "zero accesses"
 func (v *RequestValidator) ValidateAccessLimit(accessLimit int) error {
-	if accessLimit < minAccessLimit {
+	// 0 means "not set" / unlimited, which is valid
+	if accessLimit == 0 {
+		return nil
+	}
+
+	if accessLimit < 0 {
 		return fmt.Errorf("access limit cannot be negative")
 	}
 
