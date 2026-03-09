@@ -124,18 +124,21 @@ func (s *BadgerStorage) Delete(id string) error {
 		}
 	}
 
+	// First check if content exists - BadgerDB Delete doesn't return error for non-existent keys
+	exists, err := s.exists(id)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrContentNotFound
+	}
+
 	// Retry logic for transaction conflicts (max 5 attempts)
 	maxRetries := 5
-	var err error
-
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Proceed with direct database deletion
 		err = s.db.Update(func(txn *badger.Txn) error {
-			deleteErr := txn.Delete([]byte(id))
-			if deleteErr == badger.ErrKeyNotFound {
-				return ErrContentNotFound
-			}
-			return deleteErr
+			return txn.Delete([]byte(id))
 		})
 
 		// Check if this is a transaction conflict that we should retry
@@ -201,4 +204,22 @@ func (s *BadgerStorage) GetAccessManager() *AccessManager {
 // RemoveAccessTracking removes access tracking for a content ID
 func (s *BadgerStorage) RemoveAccessTracking(id string) {
 	s.accessManager.RemoveAccess(id)
+}
+
+// exists checks if a content ID exists in the database
+func (s *BadgerStorage) exists(id string) (bool, error) {
+	var exists bool
+	err := s.db.View(func(txn *badger.Txn) error {
+		_, err := txn.Get([]byte(id))
+		if err == badger.ErrKeyNotFound {
+			exists = false
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		exists = true
+		return nil
+	})
+	return exists, err
 }

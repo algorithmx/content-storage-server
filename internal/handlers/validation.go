@@ -73,6 +73,20 @@ func (v *RequestValidator) ValidateStorageRequest(req *models.StorageRequest) er
 			return fmt.Errorf("expiration time cannot be in the past")
 		}
 
+		// Check allowed content types (even in performance mode for security)
+		if len(v.config.AllowedContentTypes) > 0 {
+			allowed := false
+			for _, allowedType := range v.config.AllowedContentTypes {
+				if req.Type == allowedType {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				return fmt.Errorf("content type '%s' not in allowed types", req.Type)
+			}
+		}
+
 		return nil
 	}
 

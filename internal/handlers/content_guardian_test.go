@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -359,4 +361,146 @@ func TestTimeExpiredContentReturns410(t *testing.T) {
 	assert.Equal(t, http.StatusGone, rec.Code,
 		"Time-expired content should return 410 Gone, got %d. "+
 		"If 500, the handler is not properly handling ErrContentExpired", rec.Code)
+}
+
+// TestDeleteNonExistentContentReturns404 verifies Issue #4 fix:
+// Deleting non-existent content should return 404, not 200
+func TestDeleteNonExistentContentReturns404(t *testing.T) {
+	handler, _, cleanup := setupTestHandler(t)
+	defer cleanup()
+
+	e := echo.New()
+
+	// Try to delete a non-existent content ID
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/content/non-existent-id", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues("non-existent-id")
+
+	err := handler.DeleteContent(c)
+	require.NoError(t, err)
+
+	// Should return 404 Not Found
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"Deleting non-existent content should return 404 Not Found, got %d. "+
+		"If 200, the Delete operation is not checking existence properly", rec.Code)
+}
+
+// TestDeleteExistingContentSucceeds verifies that deleting existing content works
+func TestDeleteExistingContentSucceeds(t *testing.T) {
+	handler, badgerStorage, cleanup := setupTestHandler(t)
+	defer cleanup()
+
+	e := echo.New()
+
+	// Create and store content
+	contentID := "test-delete-existing"
+	content := &models.Content{
+		ID:        contentID,
+		Type:      "text/plain",
+		Data:      "test data",
+		CreatedAt: time.Now(),
+	}
+
+	err := badgerStorage.StoreSync(content)
+	require.NoError(t, err)
+
+	// Verify content exists
+	_, err = badgerStorage.GetReadOnly(contentID)
+	require.NoError(t, err)
+
+	// Delete the content
+	req := httptest.NewRequest(http.MethodDelete, "/api/v1/content/"+contentID, nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetParamNames("id")
+	c.SetParamValues(contentID)
+
+	err = handler.DeleteContent(c)
+	require.NoError(t, err)
+
+	// Should return 200 OK
+	assert.Equal(t, http.StatusOK, rec.Code,
+		"Deleting existing content should return 200 OK, got %d", rec.Code)
+
+	// Verify content no longer exists
+	_, err = badgerStorage.GetReadOnly(contentID)
+	assert.Error(t, err, "Content should not exist after deletion")
+}
+
+// TestContentTypeValidationInPerformanceMode verifies Issue #6 fix:
+// Content type validation should be enforced even in performance mode
+func TestContentTypeValidationInPerformanceMode(t *testing.T) {
+	handler, _, cleanup := setupTestHandler(t)
+	defer cleanup()
+
+	e := echo.New()
+
+	// The test config has AllowedContentTypes: []string{"text/plain", "application/json"}
+	// So "invalid/type" should be rejected
+
+	body := `{"id":"test-invalid-type","type":"invalid/type","data":"test data"}`
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/content", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err := handler.StoreContent(c)
+	require.NoError(t, err)
+
+	// Should return 400 Bad Request (or 415 Unsupported Media Type if implemented)
+	// The current implementation returns 400 with validation error
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"Invalid content type should be rejected with 400 Bad Request, got %d. "+
+		"If 202, content type validation is not being enforced in performance mode", rec.Code)
+
+	// Verify response contains content type error
+	responseBody := rec.Body.String()
+	assert.Contains(t, responseBody, "not in allowed types",
+		"Response should indicate content type is not allowed")
+}
+
+// TestAllowedContentTypes passes when using allowed types
+func TestAllowedContentTypes(t *testing.T) {
+	testCases := []struct {
+		name        string
+		contentType string
+		shouldPass  bool
+	}{
+		{"text/plain", "text/plain", true},
+		{"application/json", "application/json", true},
+		{"text/html", "text/html", false},
+		{"image/png", "image/png", false},
+		{"application/xml", "application/xml", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, _, cleanup := setupTestHandler(t)
+			defer cleanup()
+
+			e := echo.New()
+
+			body := fmt.Sprintf(`{"id":"test-allowed-%s","type":"%s","data":"test data"}`,
+				strings.ReplaceAll(tc.contentType, "/", "-"), tc.contentType)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/content", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+
+			err := handler.StoreContent(c)
+			require.NoError(t, err)
+
+			if tc.shouldPass {
+				assert.Equal(t, http.StatusAccepted, rec.Code,
+					"Allowed content type '%s' should be accepted, body: %s", tc.contentType, rec.Body.String())
+			} else {
+				assert.Equal(t, http.StatusBadRequest, rec.Code,
+					"Disallowed content type '%s' should be rejected", tc.contentType)
+			}
+		})
+	}
 }
