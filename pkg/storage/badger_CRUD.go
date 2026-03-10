@@ -66,8 +66,10 @@ func (s *BadgerStorage) getContentFromDB(id string, incrementAccess bool) (*mode
 	// Handle access count increment after successful retrieval
 	if incrementAccess {
 		// Check access limit BEFORE incrementing to ensure we allow exactly AccessLimit accesses
+		// AccessLimit >= 0 means limit is set (0 = no access allowed, >0 = specific limit)
+		// AccessLimit < 0 means unlimited (not set)
 		currentCount := s.accessManager.GetAccessCount(id)
-		if content.AccessLimit > 0 && currentCount >= int64(content.AccessLimit) {
+		if content.AccessLimit >= 0 && currentCount >= int64(content.AccessLimit) {
 			return nil, ErrContentExpired
 		}
 

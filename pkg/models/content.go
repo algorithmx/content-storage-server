@@ -48,7 +48,9 @@ func (c *Content) IsExpired(accessCount int64) bool {
 
 	// Check access count-based expiration
 	// Content expires when access count reaches or exceeds the limit
-	if c.AccessLimit > 0 && accessCount >= int64(c.AccessLimit) {
+	// AccessLimit >= 0 means limit is set (0 = no access allowed, >0 = specific limit)
+	// AccessLimit < 0 means unlimited (not set)
+	if c.AccessLimit >= 0 && accessCount >= int64(c.AccessLimit) {
 		return true
 	}
 

@@ -320,9 +320,9 @@ func (v *RequestValidator) validateBinaryData(data interface{}) error {
 }
 
 // ValidateAccessLimit validates access limit bounds
-// accessLimit of 0 means "not set" (unlimited), not "zero accesses"
+// accessLimit of 0 means "no access allowed" (content stored but cannot be retrieved)
 func (v *RequestValidator) ValidateAccessLimit(accessLimit int) error {
-	// 0 means "not set" / unlimited, which is valid
+	// 0 means no access allowed, which is valid
 	if accessLimit == 0 {
 		return nil
 	}
