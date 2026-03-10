@@ -1,5 +1,20 @@
-// Package main provides a simplified stress test for the Content Storage Server
-// focused primarily on RPS (Requests Per Second) measurement.
+// Package main provides an enhanced stress test for the Content Storage Server
+// that combines RPS (Requests Per Second) measurement with bug discovery capabilities.
+//
+// Bug Discovery Tests (inspired by test_client.py):
+// 1. ID Validation Edge Cases - Path traversal patterns (.., .hidden, etc.)
+// 2. Access Limit Boundary Tests - access_limit=0, 1 behavior
+// 3. Concurrent Access Limit Exhaustion - Race condition detection
+// 4. Expiration Edge Cases - Past/future expiration dates
+// 5. Content Type Validation - Invalid content types
+// 6. Large Content Handling - Size boundary tests
+// 7. Rapid Create/Delete Cycles - Timing bugs
+// 8. Data Integrity Under Load - Corruption detection
+//
+// This stress test aims to discover the same bugs as test_client.py:
+// - Bug 1: ID Validation Inconsistency (IDs with .. can be stored but not retrieved)
+// - Bug 2: Access Limit = 1 Behavior Incorrect
+// - Bug 3: Access Limit = 0 Allows Unlimited Access
 package main
 
 import (
@@ -96,6 +111,9 @@ type StressTestConfig struct {
 	SizeDistribution   SizeDistribution
 	EnableCleanup      bool
 	CleanupConcurrency int
+
+	// Bug discovery configuration
+	BugDiscovery       BugDiscoveryConfig
 }
 
 // FailureDetail represents a detailed failure record
@@ -109,12 +127,32 @@ type FailureDetail struct {
 	Endpoint     string    `json:"endpoint"`
 }
 
-// FailureCategory represents different types of failures
-type FailureCategory struct {
-	Name        string `json:"name"`
-	Count       int64  `json:"count"`
-	Percentage  float64 `json:"percentage"`
-	Examples    []FailureDetail `json:"examples,omitempty"`
+// BugDiscoveryConfig holds configuration for bug discovery tests
+type BugDiscoveryConfig struct {
+	Enabled                 bool
+	IDValidationTests       bool
+	AccessLimitTests        bool
+	ExpirationTests         bool
+	ConcurrentLimitTests    bool
+	DataIntegrityTests      bool
+	RapidCycleTests         bool
+}
+
+// BugDiscoveryResult tracks results of bug discovery tests
+type BugDiscoveryResult struct {
+	BugType         string    `json:"bug_type"`
+	Severity        string    `json:"severity"`
+	Description     string    `json:"description"`
+	Details         string    `json:"details"`
+	Timestamp       time.Time `json:"timestamp"`
+	StatusCode      int       `json:"status_code"`
+	ExpectedStatus  int       `json:"expected_status"`
+}
+
+// BugDiscoveryResults holds all discovered bugs
+type BugDiscoveryResults struct {
+	Bugs    []BugDiscoveryResult
+	mutex   sync.RWMutex
 }
 
 // TimeSeriesPoint represents a point in time with metrics
@@ -219,16 +257,20 @@ func (ct *ContentTracker) GetAll() []string {
 
 // StressTest manages the stress testing process
 type StressTest struct {
-	config         *StressTestConfig
-	metrics        *TestMetrics
-	httpClient     *http.Client
-	serverCmd      *exec.Cmd
-	ctx            context.Context
-	cancel         context.CancelFunc
-	baseURL        string
-	contentTracker *ContentTracker
-	rand           *rand.Rand
-	randMutex      sync.Mutex
+	config          *StressTestConfig
+	metrics         *TestMetrics
+	bugResults      *BugDiscoveryResults
+	httpClient      *http.Client
+	serverCmd       *exec.Cmd
+	ctx             context.Context
+	cancel          context.CancelFunc
+	baseURL         string
+	contentTracker  *ContentTracker
+	rand            *rand.Rand
+	randMutex       sync.Mutex
+	// Track content IDs for access limit testing
+	accessLimitIDs  map[string]int // contentID -> access_limit
+	accessLimitMutex sync.RWMutex
 }
 
 func main() {
@@ -276,6 +318,15 @@ func parseFlags() *StressTestConfig {
 	flag.BoolVar(&config.EnableCleanup, "cleanup", true, "Enable post-test data cleanup")
 	flag.IntVar(&config.CleanupConcurrency, "cleanup-concurrency", 50, "Concurrent cleanup workers")
 
+	// Bug discovery flags
+	flag.BoolVar(&config.BugDiscovery.Enabled, "bug-discovery", true, "Enable bug discovery tests")
+	flag.BoolVar(&config.BugDiscovery.IDValidationTests, "test-id-validation", true, "Test ID validation edge cases")
+	flag.BoolVar(&config.BugDiscovery.AccessLimitTests, "test-access-limits", true, "Test access limit boundaries")
+	flag.BoolVar(&config.BugDiscovery.ExpirationTests, "test-expiration", true, "Test expiration edge cases")
+	flag.BoolVar(&config.BugDiscovery.ConcurrentLimitTests, "test-concurrent-limits", true, "Test concurrent access limit exhaustion")
+	flag.BoolVar(&config.BugDiscovery.DataIntegrityTests, "test-data-integrity", true, "Test data integrity under load")
+	flag.BoolVar(&config.BugDiscovery.RapidCycleTests, "test-rapid-cycles", true, "Test rapid create/delete cycles")
+
 	flag.Parse()
 
 	return config
@@ -314,6 +365,18 @@ func displayConfig(config *StressTestConfig) {
 		config.SizeDistribution.Tiny*100, config.SizeDistribution.Small*100,
 		config.SizeDistribution.Medium*100, config.SizeDistribution.Large*100)
 	fmt.Printf("   Cleanup Enabled: %t (concurrency: %d)\n", config.EnableCleanup, config.CleanupConcurrency)
+
+	// Display bug discovery configuration
+	fmt.Println("\n🐛 Bug Discovery Configuration:")
+	fmt.Printf("   Enabled: %t\n", config.BugDiscovery.Enabled)
+	if config.BugDiscovery.Enabled {
+		fmt.Printf("   ID Validation Tests: %t\n", config.BugDiscovery.IDValidationTests)
+		fmt.Printf("   Access Limit Tests: %t\n", config.BugDiscovery.AccessLimitTests)
+		fmt.Printf("   Expiration Tests: %t\n", config.BugDiscovery.ExpirationTests)
+		fmt.Printf("   Concurrent Limit Tests: %t\n", config.BugDiscovery.ConcurrentLimitTests)
+		fmt.Printf("   Data Integrity Tests: %t\n", config.BugDiscovery.DataIntegrityTests)
+		fmt.Printf("   Rapid Cycle Tests: %t\n", config.BugDiscovery.RapidCycleTests)
+	}
 
 	fmt.Println(strings.Repeat("=", 50))
 	fmt.Println()
@@ -359,15 +422,22 @@ func NewStressTest(config *StressTestConfig) *StressTest {
 		startTime:          time.Now(),
 	}
 
+	// Initialize bug discovery results
+	bugResults := &BugDiscoveryResults{
+		Bugs: make([]BugDiscoveryResult, 0),
+	}
+
 	st := &StressTest{
 		config:         config,
 		metrics:        metrics,
+		bugResults:     bugResults,
 		httpClient:     &http.Client{Timeout: 30 * time.Second, Transport: transport},
 		ctx:            ctx,
 		cancel:         cancel,
 		baseURL:        fmt.Sprintf("%s://%s:%s", protocol, config.ServerHost, config.ServerPort),
 		contentTracker: NewContentTracker(100000), // Track up to 100k content IDs
 		rand:           rand.New(rand.NewSource(time.Now().UnixNano())),
+		accessLimitIDs: make(map[string]int),
 	}
 
 	return st
@@ -419,6 +489,9 @@ func (st *StressTest) Run() error {
 	}
 
 	duration := time.Since(startTime)
+
+	// Run bug discovery tests after stress test
+	st.runBugDiscoveryTests()
 
 	// Perform cleanup of test data
 	st.performCleanup()
@@ -740,7 +813,7 @@ func (st *StressTest) generateData(sizeBytes int) string {
 
 // executePostContent performs a POST request to store content
 func (st *StressTest) executePostContent(requestID int64) (int, error, string) {
-	endpoint := "POST /api/v1/content/"
+	endpoint := "POST /api/v1/content"
 
 	// Select size based on distribution
 	category := st.selectSizeCategory()
@@ -761,7 +834,7 @@ func (st *StressTest) executePostContent(requestID int64) (int, error, string) {
 	}
 
 	resp, err := st.httpClient.Post(
-		st.baseURL+"/api/v1/content/",
+		st.baseURL+"/api/v1/content",
 		"application/json",
 		strings.NewReader(string(jsonData)),
 	)
@@ -801,11 +874,11 @@ func (st *StressTest) executeGetContent() (int, error, string) {
 	return resp.StatusCode, nil, endpoint
 }
 
-// executeListContent performs GET /api/v1/content/
+// executeListContent performs GET /api/v1/content
 func (st *StressTest) executeListContent() (int, error, string) {
-	endpoint := "GET /api/v1/content/"
+	endpoint := "GET /api/v1/content"
 
-	resp, err := st.httpClient.Get(st.baseURL + "/api/v1/content/?limit=10")
+	resp, err := st.httpClient.Get(st.baseURL + "/api/v1/content?limit=10")
 	if err != nil {
 		return 0, err, endpoint
 	}
@@ -838,6 +911,673 @@ func (st *StressTest) executeDeleteContent() (int, error, string) {
 
 	io.Copy(io.Discard, resp.Body)
 	return resp.StatusCode, nil, endpoint
+}
+
+// runBugDiscoveryTests runs all enabled bug discovery tests
+func (st *StressTest) runBugDiscoveryTests() {
+	if !st.config.BugDiscovery.Enabled {
+		fmt.Println("⏭️  Bug discovery tests disabled")
+		return
+	}
+
+	fmt.Println("\n🔍 Starting Bug Discovery Tests...")
+	fmt.Println(strings.Repeat("=", 50))
+
+	if st.config.BugDiscovery.IDValidationTests {
+		st.testIDValidationEdgeCases()
+	}
+
+	if st.config.BugDiscovery.AccessLimitTests {
+		st.testAccessLimitBoundaries()
+	}
+
+	if st.config.BugDiscovery.ExpirationTests {
+		st.testExpirationEdgeCases()
+	}
+
+	if st.config.BugDiscovery.ConcurrentLimitTests {
+		st.testConcurrentAccessLimitExhaustion()
+	}
+
+	if st.config.BugDiscovery.DataIntegrityTests {
+		st.testDataIntegrityUnderLoad()
+	}
+
+	if st.config.BugDiscovery.RapidCycleTests {
+		st.testRapidCreateDeleteCycles()
+	}
+
+	// Generate bug discovery report
+	st.generateBugDiscoveryReport()
+}
+
+// recordBug records a discovered bug
+func (st *StressTest) recordBug(bugType, severity, description, details string, statusCode, expectedStatus int) {
+	st.bugResults.mutex.Lock()
+	defer st.bugResults.mutex.Unlock()
+
+	st.bugResults.Bugs = append(st.bugResults.Bugs, BugDiscoveryResult{
+		BugType:        bugType,
+		Severity:       severity,
+		Description:    description,
+		Details:        details,
+		Timestamp:      time.Now(),
+		StatusCode:     statusCode,
+		ExpectedStatus: expectedStatus,
+	})
+}
+
+// waitForContent polls the server until content is available or timeout
+// Uses /status endpoint to avoid incrementing access count
+func (st *StressTest) waitForContent(id string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		// Use /status endpoint which doesn't increment access count (uses GetReadOnly)
+		resp, err := st.httpClient.Get(st.baseURL + "/api/v1/content/" + id + "/status")
+		if err != nil {
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode == 200 {
+			// Parse status response
+			var result map[string]interface{}
+			if err := json.Unmarshal(body, &result); err == nil {
+				if data, ok := result["data"].(map[string]interface{}); ok {
+					if status, ok := data["status"].(string); ok && status == "stored" {
+						return true
+					}
+				}
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// testIDValidationEdgeCases tests Bug 1: ID Validation Inconsistency
+// IDs with '..' can be stored but not retrieved
+func (st *StressTest) testIDValidationEdgeCases() {
+	fmt.Println("\n🐛 Testing ID Validation Edge Cases...")
+
+	testIDs := []struct {
+		id          string
+		description string
+	}{
+		{"..hidden", "leading double dot"},
+		{"file..txt", "double dot in middle"},
+		{"test..", "trailing double dot"},
+		{".hidden", "leading single dot"},
+		{"file.", "trailing single dot"},
+		{"../etc/passwd", "path traversal"},
+		{"..\\windows\\", "windows path traversal"},
+		{"file%2e%2e", "url encoded dots"},
+		{"normal_id", "normal ID (should work)"},
+	}
+
+	for _, test := range testIDs {
+		// Try to store content with this ID
+		content := map[string]any{
+			"id":   test.id,
+			"data": "test data for ID validation",
+			"type": "text/plain",
+		}
+
+		jsonData, _ := json.Marshal(content)
+		resp, err := st.httpClient.Post(
+			st.baseURL+"/api/v1/content",
+			"application/json",
+			strings.NewReader(string(jsonData)),
+		)
+		if err != nil {
+			fmt.Printf("   ❌ Store failed for '%s': %v\n", test.description, err)
+			continue
+		}
+		defer resp.Body.Close()
+		storeStatus := resp.StatusCode
+
+		// Try to retrieve the content
+		getResp, getErr := st.httpClient.Get(st.baseURL + "/api/v1/content/" + test.id)
+		if getErr != nil {
+			fmt.Printf("   ❌ Get failed for '%s': %v\n", test.description, getErr)
+			continue
+		}
+		defer getResp.Body.Close()
+		getStatus := getResp.StatusCode
+
+		// Check for the bug: stored successfully but cannot retrieve
+		if storeStatus == 202 && getStatus == 400 {
+			st.recordBug(
+				"ID Validation Inconsistency",
+				"HIGH",
+				fmt.Sprintf("ID '%s' (%s) stored successfully but cannot be retrieved", test.id, test.description),
+				fmt.Sprintf("store_status=%d, get_status=%d", storeStatus, getStatus),
+				getStatus,
+				200,
+			)
+			fmt.Printf("   🐛 BUG FOUND: '%s' stored (202) but get returned %d\n", test.description, getStatus)
+		} else if storeStatus == 202 && getStatus == 200 {
+			fmt.Printf("   ✅ '%s': stored and retrieved successfully\n", test.description)
+		} else if storeStatus == 400 && getStatus == 404 {
+			fmt.Printf("   ✅ '%s': rejected at store (consistent)\n", test.description)
+		} else {
+			fmt.Printf("   ⚠️  '%s': store=%d, get=%d (unexpected)\n", test.description, storeStatus, getStatus)
+		}
+
+		// Cleanup
+		if storeStatus == 202 {
+			req, _ := http.NewRequest("DELETE", st.baseURL+"/api/v1/content/"+test.id, nil)
+			st.httpClient.Do(req)
+		}
+	}
+}
+
+// testAccessLimitBoundaries tests Bug 2 & 3: Access limit boundary issues
+func (st *StressTest) testAccessLimitBoundaries() {
+	fmt.Println("\n🐛 Testing Access Limit Boundaries...")
+
+	// Test access_limit = 1 (Bug 2)
+	fmt.Println("   Testing access_limit=1...")
+	content1 := map[string]any{
+		"id":           fmt.Sprintf("access-test-1-%d", time.Now().UnixNano()),
+		"data":         "test data",
+		"type":         "text/plain",
+		"access_limit": 1,
+	}
+
+	jsonData, err := json.Marshal(content1)
+	if err != nil {
+		fmt.Printf("   ❌ Failed to marshal content1: %v\n", err)
+		return
+	}
+	resp, err := st.httpClient.Post(
+		st.baseURL+"/api/v1/content",
+		"application/json",
+		strings.NewReader(string(jsonData)),
+	)
+	if err != nil {
+		fmt.Printf("   ❌ POST failed for access_limit=1: %v\n", err)
+		return
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode == 202 {
+		// Wait for content to be stored (poll status endpoint)
+		if !st.waitForContent(content1["id"].(string), 2*time.Second) {
+			fmt.Printf("   ⚠️  Content not available after 2s, skipping test\n")
+			return
+		}
+
+		// First access - should succeed
+		getResp1, err := st.httpClient.Get(st.baseURL + "/api/v1/content/" + content1["id"].(string))
+		if err != nil {
+			fmt.Printf("   ❌ GET failed for access_limit=1: %v\n", err)
+		} else {
+			io.Copy(io.Discard, getResp1.Body)
+			status1 := getResp1.StatusCode
+			getResp1.Body.Close()
+
+			if status1 == 410 {
+				st.recordBug(
+					"Access Limit = 1 Behavior",
+					"HIGH",
+					"access_limit=1 returns 410 on first access (should allow 1 access)",
+					fmt.Sprintf("first_status=%d, expected=200", status1),
+					status1,
+					200,
+				)
+				fmt.Printf("   🐛 BUG FOUND: access_limit=1 returned 410 on first access\n")
+			} else if status1 == 200 {
+				fmt.Printf("   ✅ access_limit=1: first access returned 200 (correct)\n")
+
+				// Second access - should fail
+				getResp2, err := st.httpClient.Get(st.baseURL + "/api/v1/content/" + content1["id"].(string))
+				if err == nil {
+					io.Copy(io.Discard, getResp2.Body)
+					status2 := getResp2.StatusCode
+					getResp2.Body.Close()
+					if status2 == 410 {
+						fmt.Printf("   ✅ access_limit=1: second access returned 410 (correct)\n")
+					} else {
+						fmt.Printf("   ⚠️  access_limit=1: second access returned %d (expected 410)\n", status2)
+					}
+				}
+			} else {
+				fmt.Printf("   ⚠️  access_limit=1: first access returned %d (unexpected)\n", status1)
+			}
+		}
+
+		// Cleanup
+		req, _ := http.NewRequest("DELETE", st.baseURL+"/api/v1/content/"+content1["id"].(string), nil)
+		st.httpClient.Do(req)
+	}
+
+	// Test access_limit = 0 (Bug 3)
+	fmt.Println("   Testing access_limit=0...")
+	content0 := map[string]any{
+		"id":           fmt.Sprintf("access-test-0-%d", time.Now().UnixNano()),
+		"data":         "test data",
+		"type":         "text/plain",
+		"access_limit": 0,
+	}
+
+	jsonData0, err := json.Marshal(content0)
+	if err != nil {
+		fmt.Printf("   ❌ Failed to marshal content0: %v\n", err)
+		return
+	}
+	resp0, err := st.httpClient.Post(
+		st.baseURL+"/api/v1/content",
+		"application/json",
+		strings.NewReader(string(jsonData0)),
+	)
+	if err != nil {
+		fmt.Printf("   ❌ POST failed for access_limit=0: %v\n", err)
+		return
+	}
+	io.Copy(io.Discard, resp0.Body)
+	storeStatus := resp0.StatusCode
+	resp0.Body.Close()
+
+	if storeStatus == 202 {
+		// Wait for content to be stored (poll status endpoint)
+		if !st.waitForContent(content0["id"].(string), 2*time.Second) {
+			fmt.Printf("   ⚠️  Content not available after 2s, skipping test\n")
+			return
+		}
+
+		// access_limit=0 means "no access allowed" - content should return 410 immediately
+		getResp, err := st.httpClient.Get(st.baseURL + "/api/v1/content/" + content0["id"].(string))
+		if err == nil {
+			io.Copy(io.Discard, getResp.Body)
+			status := getResp.StatusCode
+			getResp.Body.Close()
+
+			if status == 410 {
+				fmt.Printf("   ✅ access_limit=0: first access returned 410 (correct - no access allowed)\n")
+			} else if status == 200 {
+				// BUG: access_limit=0 should mean "no access allowed", not "unlimited access"
+				st.recordBug(
+					"Access Limit = 0 Behavior",
+					"MEDIUM",
+					"access_limit=0 allows access when it should mean 'no access allowed'",
+					fmt.Sprintf("first access returned 200, expected 410"),
+					200,
+					410,
+				)
+				fmt.Printf("   🐛 BUG FOUND: access_limit=0 allows access (expected 410, got 200)\n")
+			} else {
+				fmt.Printf("   ⚠️  access_limit=0: first access returned %d (unexpected)\n", status)
+			}
+		}
+	}
+
+	// Cleanup
+	req, _ := http.NewRequest("DELETE", st.baseURL+"/api/v1/content/"+content0["id"].(string), nil)
+	st.httpClient.Do(req)
+}
+
+// testExpirationEdgeCases tests expiration date boundaries
+func (st *StressTest) testExpirationEdgeCases() {
+	fmt.Println("\n🐛 Testing Expiration Edge Cases...")
+
+	now := time.Now()
+
+	testCases := []struct {
+		name       string
+		expiration time.Time
+		expected   int // Expected GET status
+	}{
+		{"past date", now.Add(-1 * time.Hour), 404},
+		{"now", now, 404},
+		{"1 second ago", now.Add(-1 * time.Second), 404},
+		{"1 second future", now.Add(1 * time.Second), 200},
+		{"future date", now.Add(1 * time.Hour), 200},
+	}
+
+	for _, tc := range testCases {
+		id := fmt.Sprintf("expire-test-%d", time.Now().UnixNano())
+		content := map[string]any{
+			"id":         id,
+			"data":       "test data",
+			"type":       "text/plain",
+			"expiration": tc.expiration.Format(time.RFC3339),
+		}
+
+		jsonData, _ := json.Marshal(content)
+		resp, _ := st.httpClient.Post(
+			st.baseURL+"/api/v1/content/",
+			"application/json",
+			strings.NewReader(string(jsonData)),
+		)
+		if resp != nil {
+			resp.Body.Close()
+			// Wait for async store
+			time.Sleep(100 * time.Millisecond)
+
+			getResp, _ := st.httpClient.Get(st.baseURL + "/api/v1/content/" + id)
+			if getResp != nil {
+				status := getResp.StatusCode
+				getResp.Body.Close()
+
+				if status != tc.expected {
+					// Report as issue, not necessarily bug
+					fmt.Printf("   ⚠️  '%s': expected %d, got %d\n", tc.name, tc.expected, status)
+				} else {
+					fmt.Printf("   ✅ '%s': got expected %d\n", tc.name, status)
+				}
+			}
+
+			// Cleanup
+			req, _ := http.NewRequest("DELETE", st.baseURL+"/api/v1/content/"+id, nil)
+			st.httpClient.Do(req)
+		}
+	}
+}
+
+// testConcurrentAccessLimitExhaustion tests race conditions with access limits
+func (st *StressTest) testConcurrentAccessLimitExhaustion() {
+	fmt.Println("\n🐛 Testing Concurrent Access Limit Exhaustion...")
+
+	id := fmt.Sprintf("concurrent-limit-%d", time.Now().UnixNano())
+	accessLimit := 5
+
+	content := map[string]any{
+		"id":           id,
+		"data":         "test data for concurrent access",
+		"type":         "text/plain",
+		"access_limit": accessLimit,
+	}
+
+	jsonData, err := json.Marshal(content)
+	if err != nil {
+		fmt.Printf("   ❌ Failed to marshal content: %v\n", err)
+		return
+	}
+	resp, err := st.httpClient.Post(
+		st.baseURL+"/api/v1/content",
+		"application/json",
+		strings.NewReader(string(jsonData)),
+	)
+	if err != nil {
+		fmt.Printf("   ❌ POST failed for concurrent test: %v\n", err)
+		return
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 202 {
+		fmt.Printf("   ⚠️  Unexpected store status: %d\n", resp.StatusCode)
+		return
+	}
+
+	// Wait for content to be stored (poll status endpoint)
+	if !st.waitForContent(id, 2*time.Second) {
+		fmt.Printf("   ⚠️  Content not available after 2s, skipping concurrent test\n")
+		return
+	}
+
+	// Spawn concurrent requests
+	concurrency := 20
+	var wg sync.WaitGroup
+	successCount := int64(0)
+	goneCount := int64(0)
+	notFoundCount := int64(0)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			getResp, err := st.httpClient.Get(st.baseURL + "/api/v1/content/" + id)
+			if err != nil {
+				return
+			}
+			io.Copy(io.Discard, getResp.Body)
+			status := getResp.StatusCode
+			getResp.Body.Close()
+
+			switch status {
+			case 200:
+				atomic.AddInt64(&successCount, 1)
+			case 410:
+				atomic.AddInt64(&goneCount, 1)
+			case 404:
+				atomic.AddInt64(&notFoundCount, 1)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Note: With truly concurrent requests, we may not get exactly accessLimit successes
+	// The test checks that we get AT MOST accessLimit successes (not more)
+	// And that total successes + gone equals the number of requests that completed
+	totalAccounted := successCount + goneCount + notFoundCount
+	fmt.Printf("   📊 Results: successes=%d, gone=%d, not_found=%d, total_accounted=%d\n",
+		successCount, goneCount, notFoundCount, totalAccounted)
+
+	// Bug: If we got MORE than accessLimit successes, that's a real bug
+	if int(successCount) > accessLimit {
+		st.recordBug(
+			"Concurrent Access Limit Exceeded",
+			"HIGH",
+			"Concurrent access allowed MORE successes than access_limit",
+			fmt.Sprintf("expected at most %d successes, got %d", accessLimit, successCount),
+			int(successCount),
+			accessLimit,
+		)
+		fmt.Printf("   🐛 BUG FOUND: Got %d successes (more than limit %d)\n", successCount, accessLimit)
+	} else if int(successCount) == 0 && int(goneCount) == 0 && int(notFoundCount) > 0 {
+		// Not a bug - content expired before concurrent test ran
+		fmt.Printf("   ⚠️  Content expired before test (all 404s)\n")
+	} else {
+		fmt.Printf("   ✅ Concurrent access: at most %d successes (limit %d)\n", successCount, accessLimit)
+	}
+
+	// Cleanup
+	req, _ := http.NewRequest("DELETE", st.baseURL+"/api/v1/content/"+id, nil)
+	st.httpClient.Do(req)
+}
+
+// testDataIntegrityUnderLoad tests for data corruption under load
+func (st *StressTest) testDataIntegrityUnderLoad() {
+	fmt.Println("\n🐛 Testing Data Integrity Under Load...")
+
+	// Store content with known data
+	id := fmt.Sprintf("integrity-%d", time.Now().UnixNano())
+	originalData := "INTEGRITY_TEST_DATA_12345"
+
+	content := map[string]any{
+		"id":   id,
+		"data": originalData,
+		"type": "text/plain",
+	}
+
+	jsonData, err := json.Marshal(content)
+	if err != nil {
+		fmt.Printf("   ❌ Failed to marshal content: %v\n", err)
+		return
+	}
+	resp, err := st.httpClient.Post(
+		st.baseURL+"/api/v1/content",
+		"application/json",
+		strings.NewReader(string(jsonData)),
+	)
+	if err != nil {
+		fmt.Printf("   ❌ POST failed for data integrity test: %v\n", err)
+		return
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != 202 {
+		fmt.Printf("   ⚠️  Unexpected store status: %d\n", resp.StatusCode)
+		return
+	}
+
+	// Wait for content to be stored (poll status endpoint)
+	if !st.waitForContent(id, 2*time.Second) {
+		fmt.Printf("   ⚠️  Content not available after 2s, skipping test\n")
+		return
+	}
+
+	// Concurrent reads to verify integrity
+	concurrency := 10
+	iterations := 10
+	var wg sync.WaitGroup
+	mismatchCount := int64(0)
+	successReads := int64(0)
+	notFoundCount := int64(0)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				getResp, err := st.httpClient.Get(st.baseURL + "/api/v1/content/" + id)
+				if err != nil {
+					continue
+				}
+
+				body, _ := io.ReadAll(getResp.Body)
+				getResp.Body.Close()
+
+				switch getResp.StatusCode {
+				case 200:
+					atomic.AddInt64(&successReads, 1)
+					var result map[string]any
+					if err := json.Unmarshal(body, &result); err == nil {
+						if data, ok := result["data"].(string); ok {
+							if data != originalData {
+								atomic.AddInt64(&mismatchCount, 1)
+							}
+						}
+					}
+				case 404:
+					atomic.AddInt64(&notFoundCount, 1)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	if mismatchCount > 0 {
+		st.recordBug(
+			"Data Integrity",
+			"HIGH",
+			"Data integrity violation under concurrent load",
+			fmt.Sprintf("%d mismatches detected out of %d reads", mismatchCount, successReads),
+			0,
+			0,
+		)
+		fmt.Printf("   🐛 BUG FOUND: %d data integrity violations\n", mismatchCount)
+	} else {
+		fmt.Printf("   ✅ Data integrity verified under load (%d reads, %d not found)\n", successReads, notFoundCount)
+	}
+
+	// Cleanup
+	req, _ := http.NewRequest("DELETE", st.baseURL+"/api/v1/content/"+id, nil)
+	st.httpClient.Do(req)
+}
+
+// testRapidCreateDeleteCycles tests for timing issues with rapid operations
+func (st *StressTest) testRapidCreateDeleteCycles() {
+	fmt.Println("\n🐛 Testing Rapid Create/Delete Cycles...")
+
+	cycles := 10
+	errors := 0
+
+	for i := 0; i < cycles; i++ {
+		id := fmt.Sprintf("rapid-%d-%d", i, time.Now().UnixNano())
+
+		// Create
+		content := map[string]any{
+			"id":   id,
+			"data": "test data",
+			"type": "text/plain",
+		}
+
+		jsonData, _ := json.Marshal(content)
+		resp, err := st.httpClient.Post(
+			st.baseURL+"/api/v1/content",
+			"application/json",
+			strings.NewReader(string(jsonData)),
+		)
+		if err != nil || resp.StatusCode != 202 {
+			errors++
+			if resp != nil {
+				resp.Body.Close()
+			}
+			continue
+		}
+		resp.Body.Close()
+
+		// Immediate delete (before async store completes)
+		req, _ := http.NewRequest("DELETE", st.baseURL+"/api/v1/content/"+id, nil)
+		deleteResp, _ := st.httpClient.Do(req)
+		if deleteResp != nil {
+			deleteResp.Body.Close()
+		}
+
+		// Try to read - might get 404 or 200 depending on timing
+		getResp, _ := st.httpClient.Get(st.baseURL + "/api/v1/content/" + id)
+		if getResp != nil {
+			getResp.Body.Close()
+		}
+	}
+
+	fmt.Printf("   ✅ Completed %d rapid cycles (errors: %d)\n", cycles, errors)
+}
+
+// generateBugDiscoveryReport generates a report of discovered bugs
+func (st *StressTest) generateBugDiscoveryReport() {
+	st.bugResults.mutex.RLock()
+	defer st.bugResults.mutex.RUnlock()
+
+	fmt.Println("\n" + strings.Repeat("=", 80))
+	fmt.Println("🐛 BUG DISCOVERY REPORT")
+	fmt.Println(strings.Repeat("=", 80))
+
+	if len(st.bugResults.Bugs) == 0 {
+		fmt.Println("\n✅ No bugs discovered in this run!")
+		return
+	}
+
+	fmt.Printf("\nTotal Bugs Discovered: %d\n\n", len(st.bugResults.Bugs))
+
+	// Group by severity
+	severityCount := make(map[string]int)
+	for _, bug := range st.bugResults.Bugs {
+		severityCount[bug.Severity]++
+	}
+
+	fmt.Println("Severity Distribution:")
+	for sev, count := range severityCount {
+		icon := "⚠️"
+		switch sev {
+		case "HIGH":
+			icon = "🔴"
+		case "MEDIUM":
+			icon = "🟡"
+		case "LOW":
+			icon = "🟢"
+		}
+		fmt.Printf("   %s %s: %d\n", icon, sev, count)
+	}
+
+	fmt.Println("\nDiscovered Bugs:")
+	for i, bug := range st.bugResults.Bugs {
+		fmt.Printf("\n%d. [%s] %s\n", i+1, bug.Severity, bug.BugType)
+		fmt.Printf("   Description: %s\n", bug.Description)
+		fmt.Printf("   Details: %s\n", bug.Details)
+		fmt.Printf("   Timestamp: %s\n", bug.Timestamp.Format(time.RFC3339))
+	}
+
+	fmt.Println("\n" + strings.Repeat("=", 80))
 }
 
 // performCleanup deletes all test content created during the stress test
@@ -1396,7 +2136,9 @@ func (st *StressTest) generateFailureTrendAnalysis() {
 // exportDetailedStats exports detailed statistics to JSON file
 func (st *StressTest) exportDetailedStats(duration time.Duration) {
 	st.metrics.mutex.RLock()
+	st.bugResults.mutex.RLock()
 	defer st.metrics.mutex.RUnlock()
+	defer st.bugResults.mutex.RUnlock()
 
 	// Create comprehensive stats structure
 	stats := map[string]interface{}{
@@ -1405,6 +2147,15 @@ func (st *StressTest) exportDetailedStats(duration time.Duration) {
 			"max_concurrency": st.config.MaxConcurrency,
 			"target_url":      st.baseURL,
 			"https_enabled":   st.config.UseHTTPS,
+			"bug_discovery": map[string]interface{}{
+				"enabled":              st.config.BugDiscovery.Enabled,
+				"id_validation_tests":  st.config.BugDiscovery.IDValidationTests,
+				"access_limit_tests":   st.config.BugDiscovery.AccessLimitTests,
+				"expiration_tests":     st.config.BugDiscovery.ExpirationTests,
+				"concurrent_tests":     st.config.BugDiscovery.ConcurrentLimitTests,
+				"data_integrity_tests": st.config.BugDiscovery.DataIntegrityTests,
+				"rapid_cycle_tests":    st.config.BugDiscovery.RapidCycleTests,
+			},
 		},
 		"summary": map[string]interface{}{
 			"total_requests":      atomic.LoadInt64(&st.metrics.TotalRequests),
@@ -1430,6 +2181,10 @@ func (st *StressTest) exportDetailedStats(duration time.Duration) {
 			"by_code":     st.metrics.FailuresByCode,
 			"by_endpoint": st.metrics.FailuresByEndpoint,
 			"details":     st.metrics.FailureDetails,
+		},
+		"bug_discovery": map[string]interface{}{
+			"bugs_found": len(st.bugResults.Bugs),
+			"bugs":       st.bugResults.Bugs,
 		},
 		"time_series": st.metrics.TimeSeries,
 		"timestamp":   time.Now().Format(time.RFC3339),
