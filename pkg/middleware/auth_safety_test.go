@@ -182,6 +182,8 @@ func TestAuthBypassForPublicEndpoints(t *testing.T) {
 		EnableAuth:          true,
 		APIKey:              "test-api-key",
 		AllowQueryParamAuth: false,
+		EnableSwagger:       true,  // Default: swagger is public
+		RequireAuthForUI:    false, // Default: UI is public
 	}
 
 	logger := zap.NewNop()
@@ -415,5 +417,135 @@ func TestEmptyAPIKeyInConfig(t *testing.T) {
 	// The test documents the current behavior
 	if rec.Code == http.StatusOK {
 		t.Log("Note: Empty API key in config matches empty header (edge case)")
+	}
+}
+
+// TestEnableSwaggerFalse tests that swagger requires auth when ENABLE_SWAGGER=false
+func TestEnableSwaggerFalse(t *testing.T) {
+	cfg := &config.Config{
+		EnableAuth:          true,
+		APIKey:              "test-api-key-32-chars-minimum!!",
+		AllowQueryParamAuth: false,
+		EnableSwagger:       false, // Disable swagger
+		RequireAuthForUI:    false,
+	}
+
+	logger := zap.NewNop()
+	middleware := EchoAPIKeyMiddleware(cfg, logger)
+
+	e := echo.New()
+	e.Use(middleware)
+
+	e.GET("/swagger/index.html", func(c echo.Context) error {
+		return c.String(http.StatusOK, "swagger doc")
+	})
+
+	// Without auth, swagger should be blocked
+	req := httptest.NewRequest(http.MethodGet, "/swagger/index.html", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("Swagger should require auth when EnableSwagger=false, got status %d", rec.Code)
+	}
+
+	// With auth, swagger should work
+	req = httptest.NewRequest(http.MethodGet, "/swagger/index.html", nil)
+	req.Header.Set("X-API-Key", "test-api-key-32-chars-minimum!!")
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Swagger should work with valid auth, got status %d", rec.Code)
+	}
+}
+
+// TestRequireAuthForUITrue tests that UI requires auth when REQUIRE_AUTH_FOR_UI=true
+func TestRequireAuthForUITrue(t *testing.T) {
+	cfg := &config.Config{
+		EnableAuth:          true,
+		APIKey:              "test-api-key-32-chars-minimum!!",
+		AllowQueryParamAuth: false,
+		EnableSwagger:       true,
+		RequireAuthForUI:    true, // Require auth for UI
+	}
+
+	logger := zap.NewNop()
+	middleware := EchoAPIKeyMiddleware(cfg, logger)
+
+	e := echo.New()
+	e.Use(middleware)
+
+	e.GET("/", func(c echo.Context) error {
+		return c.String(http.StatusOK, "root")
+	})
+	e.GET("/static/test.js", func(c echo.Context) error {
+		return c.String(http.StatusOK, "static file")
+	})
+
+	// Without auth, root should be blocked
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("Root should require auth when RequireAuthForUI=true, got status %d", rec.Code)
+	}
+
+	// Without auth, static files should be blocked
+	req = httptest.NewRequest(http.MethodGet, "/static/test.js", nil)
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("Static files should require auth when RequireAuthForUI=true, got status %d", rec.Code)
+	}
+
+	// With auth, root should work
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-API-Key", "test-api-key-32-chars-minimum!!")
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("Root should work with valid auth, got status %d", rec.Code)
+	}
+}
+
+// TestHealthEndpointsAlwaysPublic tests that health endpoints are always public
+func TestHealthEndpointsAlwaysPublic(t *testing.T) {
+	cfg := &config.Config{
+		EnableAuth:          true,
+		APIKey:              "test-api-key-32-chars-minimum!!",
+		AllowQueryParamAuth: false,
+		EnableSwagger:       false,
+		RequireAuthForUI:    true,
+	}
+
+	logger := zap.NewNop()
+	middleware := EchoAPIKeyMiddleware(cfg, logger)
+
+	e := echo.New()
+	e.Use(middleware)
+
+	e.GET("/health", func(c echo.Context) error {
+		return c.String(http.StatusOK, "health ok")
+	})
+	e.GET("/health/detailed", func(c echo.Context) error {
+		return c.String(http.StatusOK, "detailed health")
+	})
+	e.GET("/ping", func(c echo.Context) error {
+		return c.String(http.StatusOK, "pong")
+	})
+
+	healthPaths := []string{"/health", "/health/detailed", "/ping"}
+	for _, path := range healthPaths {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("Health endpoint %s should always be public, got status %d", path, rec.Code)
+		}
 	}
 }

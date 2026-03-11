@@ -16,12 +16,20 @@ import (
 func EchoAPIKeyMiddleware(cfg *config.Config, appLogger *zap.Logger) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			// Skip authentication for health checks, heartbeat, profiler endpoints, and static files
 			path := c.Request().URL.Path
-			if path == "/health" || path == "/health/detailed" ||
-				path == "/ping" || strings.HasPrefix(path, "/debug/") ||
-				strings.HasPrefix(path, "/static/") || path == "/" ||
-				strings.HasPrefix(path, "/swagger/") {
+
+			// Always public endpoints (health checks, heartbeat, profiler)
+			if path == "/health" || path == "/health/detailed" || path == "/ping" || strings.HasPrefix(path, "/debug/") {
+				return next(c)
+			}
+
+			// Conditionally public endpoints based on config
+			// Management UI - requires auth if RequireAuthForUI is true
+			if !cfg.RequireAuthForUI && (path == "/" || strings.HasPrefix(path, "/static/")) {
+				return next(c)
+			}
+			// Swagger documentation - requires auth if EnableSwagger is false
+			if cfg.EnableSwagger && strings.HasPrefix(path, "/swagger/") {
 				return next(c)
 			}
 

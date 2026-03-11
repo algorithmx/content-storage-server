@@ -113,6 +113,9 @@ type Config struct {
 	// GROUP 9: SECURITY & DEBUGGING SETTINGS
 	// =============================================================================
 	EnableProfiler      bool              // Enable pprof endpoints
+	EnableSwagger       bool              // Enable Swagger documentation endpoints (default: true)
+	RequireAuthForUI    bool              // Require authentication for management UI (default: false)
+	MinAPIKeyLength     int               // Minimum API key length (0 to disable enforcement)
 	AllowedContentTypes []string          // Allowed request content types
 	SecurityHeaders     map[string]string // Custom security headers
 
@@ -211,11 +214,15 @@ func Load() *Config {
 
 		// Security settings
 		EnableProfiler:      envBool("ENABLE_PROFILER", false),
+		EnableSwagger:       envBool("ENABLE_SWAGGER", true),       // Enabled by default for backwards compatibility
+		RequireAuthForUI:    envBool("REQUIRE_AUTH_FOR_UI", false), // Disabled by default for backwards compatibility
+		MinAPIKeyLength:     envInt("MIN_API_KEY_LENGTH", 32),      // Minimum 32 chars, set to 0 to bypass
 		AllowedContentTypes: envStringSlice("ALLOWED_CONTENT_TYPES", []string{"application/json", "text/plain"}),
 		SecurityHeaders: envStringMap("SECURITY_HEADERS", map[string]string{
-			"X-Content-Type-Options": "nosniff",
-			"X-Frame-Options":        "DENY",
-			"X-XSS-Protection":       "1; mode=block",
+			"X-Content-Type-Options":  "nosniff",
+			"X-Frame-Options":         "DENY",
+			"X-XSS-Protection":        "1; mode=block",
+			"Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
 		}),
 
 		// Selective logging settings
@@ -423,8 +430,8 @@ func (cfg *Config) Validate() (warnings []string, errors []string) {
 
 	if cfg.APIKey == "" && cfg.EnableAuth {
 		errors = append(errors, "Authentication is enabled but API_KEY is empty. Set a secure API key.")
-	} else if cfg.APIKey != "" && len(cfg.APIKey) < 32 {
-		warnings = append(warnings, fmt.Sprintf("API key is only %d characters. Recommend at least 32 characters for security.", len(cfg.APIKey)))
+	} else if cfg.APIKey != "" && cfg.MinAPIKeyLength > 0 && len(cfg.APIKey) < cfg.MinAPIKeyLength {
+		errors = append(errors, fmt.Sprintf("API key must be at least %d characters (got %d). Set MIN_API_KEY_LENGTH=0 to bypass.", cfg.MinAPIKeyLength, len(cfg.APIKey)))
 	}
 
 	if len(cfg.AllowedOrigins) == 0 {
@@ -444,6 +451,14 @@ func (cfg *Config) Validate() (warnings []string, errors []string) {
 
 	if !cfg.EnableTLS && cfg.EnableAuth {
 		warnings = append(warnings, "Authentication enabled without TLS. API keys are transmitted in plaintext. Enable TLS for production.")
+	}
+
+	// Security options warnings
+	if cfg.EnableSwagger && cfg.EnableAuth {
+		warnings = append(warnings, "Swagger documentation is publicly accessible. Consider setting ENABLE_SWAGGER=false in production.")
+	}
+	if !cfg.RequireAuthForUI && cfg.EnableAuth {
+		warnings = append(warnings, "Management UI is publicly accessible. Consider setting REQUIRE_AUTH_FOR_UI=true in production.")
 	}
 
 	// Timeout validation
