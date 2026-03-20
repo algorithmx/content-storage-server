@@ -42,6 +42,14 @@ type QueuedWriteBatch struct {
 	// Synchronization for queue capacity operations
 	capacityMutex sync.Mutex // Protects queue capacity doubling operations
 
+	// Protects access to the writeQueue channel reference during swaps/resizes.
+	// We never hold this lock while doing blocking channel operations; we only
+	// use it to safely load/store the channel pointer.
+	writeQueueMu sync.RWMutex
+
+	// queueResizeCh wakes the worker when DoubleQueueCapacity swaps the queue.
+	queueResizeCh chan struct{}
+
 	// Queue growth limits to prevent unbounded memory growth
 	initialQueueSize int  // Initial queue size for calculating maximum limit
 	maxMultiplier    int  // Maximum multiplier of initial queue size (default: 10x)
@@ -90,6 +98,7 @@ func NewQueuedWriteBatch(db *badger.DB, opts QueuedWriteBatchOptions) *QueuedWri
 		batchTimeout: opts.BatchTimeout,
 		maxBatchSize: opts.BatchSize,
 		stopChan:     make(chan struct{}),
+		queueResizeCh: make(chan struct{}, 1),
 		metrics: QueueMetrics{
 			QueueDepth:      0,
 			TotalQueued:     0,
@@ -148,8 +157,11 @@ func (qwb *QueuedWriteBatch) worker() {
 	for {
 		switch currentState {
 		case workerStateRunning:
+			// Load the queue reference once per select cycle.
+			// This avoids data races with DoubleQueueCapacity swapping the channel.
+			queue := qwb.getWriteQueue()
 			select {
-			case task := <-qwb.writeQueue:
+			case task := <-queue:
 				// Add task to current batch
 				batch = append(batch, task)
 
@@ -171,6 +183,9 @@ func (qwb *QueuedWriteBatch) worker() {
 					qwb.processBatch(batch) // process partial batch
 					batch = batch[:0]       // Reset batch
 				}
+
+			case <-qwb.queueResizeCh:
+				// Capacity/queue swap happened; reload queue on next outer-loop iteration.
 
 			case <-qwb.stopChan:
 				// Transition to stopping state
@@ -339,6 +354,16 @@ func (qwb *QueuedWriteBatch) processBatch(tasks []*WriteTask) {
 	}
 }
 
+// getWriteQueue loads the current queue channel reference under a read lock.
+// It returns the channel by value so callers can safely send/receive without
+// holding the lock.
+func (qwb *QueuedWriteBatch) getWriteQueue() chan *WriteTask {
+	qwb.writeQueueMu.RLock()
+	q := qwb.writeQueue
+	qwb.writeQueueMu.RUnlock()
+	return q
+}
+
 // DoubleQueueCapacity safely doubles the queue capacity by creating a new channel
 // and transferring existing tasks. This operation is thread-safe and coordinates
 // with the worker goroutine to ensure no tasks are lost.
@@ -373,32 +398,39 @@ func (qwb *QueuedWriteBatch) DoubleQueueCapacity() error {
 	// Create new channel with doubled capacity
 	newQueue := make(chan *WriteTask, newCapacity)
 
-	// Get the current queue length to know how many tasks to transfer
-	// We use len() which is safe for channels
-	currentQueueLen := len(qwb.writeQueue)
+	// Swap under lock to prevent concurrent reads/writes of the queue reference.
+	// We only protect the channel pointer here; we never hold the lock while
+	// performing blocking channel operations in other goroutines.
+	qwb.writeQueueMu.Lock()
+	oldQueue := qwb.writeQueue
 
-	var transferredCount int // Declare transferredCount here
-
-	// Transfer existing tasks from old queue to new queue
-	// This loop will block until all tasks are transferred to the new queue,
-	// ensuring no data loss during capacity doubling.
-	for i := 0; i < currentQueueLen; i++ {
-		task := <-qwb.writeQueue // This will block if the old queue is empty, but we know its length
-		newQueue <- task         // This will block if the new queue is full, ensuring transfer
-		transferredCount++
-	}
-
-	// Atomically replace the old queue with the new one
-	// This is the critical section where we swap the channels
+	// Replace the queue channel reference.
 	qwb.writeQueue = newQueue
 	qwb.maxQueueSize = newCapacity
 
-	// Log the capacity change for monitoring
-	// In production, this would use structured logging
-	// fmt.Printf("Queue capacity doubled from %d to %d, transferred %d tasks\n",
-	//     oldCapacity, newCapacity, transferredCount)
+	// Drain any tasks already present in the old queue into the new queue.
+	// We use non-blocking receive, because the worker may concurrently drain
+	// tasks from oldQueue. QueueWrite is blocked while we hold writeQueueMu,
+	// so no new tasks can arrive on oldQueue after the swap.
+	transferredCount := 0
+	for {
+		select {
+		case task := <-oldQueue:
+			newQueue <- task
+			transferredCount++
+		default:
+			qwb.writeQueueMu.Unlock()
 
-	return nil
+			// Wake the worker so it can reload the (now swapped) queue reference.
+			select {
+			case qwb.queueResizeCh <- struct{}{}:
+			default:
+			}
+
+			_ = transferredCount // reserved for future metrics/logging
+			return nil
+		}
+	}
 }
 
 func (qwb *QueuedWriteBatch) storePendingItem(contentID string, task *WriteTask) {
@@ -425,35 +457,44 @@ func (qwb *QueuedWriteBatch) QueueWrite(content *models.Content) error {
 		MarshaledData: data,
 	}
 
-	// Check queue capacity and handle full queue by doubling capacity
+	// Check queue capacity and handle full queue by doubling capacity.
+	// We lock only for loading the queue pointer and making the non-blocking send decision.
+	qwb.writeQueueMu.RLock()
+	queue := qwb.writeQueue
 	select {
-	case qwb.writeQueue <- task:
+	case queue <- task:
+		qwb.writeQueueMu.RUnlock()
 		// Successfully queued - track pending item (always store the latest task for this ID)
 		// Note: This overwrites previous pending tasks for the same ID, but that's intentional
 		// since we only need to track that there's a pending write for this ID
 		qwb.storePendingItem(content.ID, task)
 		return nil
 	default:
-		// Queue is full - double the capacity instead of returning error
-		if err := qwb.DoubleQueueCapacity(); err != nil {
-			// If capacity doubling fails, fall back to original error behavior
-			currentMaxQueueSize := qwb.getMaxQueueSizeProtected()
-			return fmt.Errorf("write queue is full (capacity: %d) and failed to double capacity: %v", currentMaxQueueSize, err)
-		}
-
-		// Try to queue again with the new doubled capacity
-		select {
-		case qwb.writeQueue <- task:
-			// Successfully queued after capacity doubling
-			qwb.storePendingItem(content.ID, task)
-			return nil
-		default:
-			// This should be very rare - the new queue is also full immediately
-			// This could happen under extreme load conditions
-			currentMaxQueueSize := qwb.getMaxQueueSizeProtected()
-			return fmt.Errorf("write queue is still full even after doubling capacity to %d", currentMaxQueueSize)
-		}
+		qwb.writeQueueMu.RUnlock()
 	}
+
+	// Queue is full - double the capacity instead of returning error.
+	if err := qwb.DoubleQueueCapacity(); err != nil {
+		// If capacity doubling fails, fall back to original error behavior.
+		currentMaxQueueSize := qwb.getMaxQueueSizeProtected()
+		return fmt.Errorf("write queue is full (capacity: %d) and failed to double capacity: %v", currentMaxQueueSize, err)
+	}
+
+	// Try to queue again with the new doubled capacity.
+	qwb.writeQueueMu.RLock()
+	queue = qwb.writeQueue
+	select {
+	case queue <- task:
+		qwb.writeQueueMu.RUnlock()
+		qwb.storePendingItem(content.ID, task)
+		return nil
+	default:
+		qwb.writeQueueMu.RUnlock()
+	}
+
+	// This should be very rare - the new queue is also full immediately under extreme load.
+	currentMaxQueueSize := qwb.getMaxQueueSizeProtected()
+	return fmt.Errorf("write queue is still full even after doubling capacity to %d", currentMaxQueueSize)
 }
 
 // QueueWriteSync queues a write operation and waits for completion
@@ -470,30 +511,44 @@ func (qwb *QueuedWriteBatch) QueueWriteSync(content *models.Content) error {
 		ResultChan:    make(chan error, 1),
 	}
 
-	// Queue the task with capacity doubling if needed
+	queued := false
+
+	// Queue the task with capacity doubling if needed.
+	qwb.writeQueueMu.RLock()
+	queue := qwb.writeQueue
 	select {
-	case qwb.writeQueue <- task:
-		// Successfully queued - track pending item
-		qwb.storePendingItem(content.ID, task)
+	case queue <- task:
+		queued = true
 	default:
-		// Queue is full - double the capacity instead of returning error
+	}
+	qwb.writeQueueMu.RUnlock()
+
+	if queued {
+		qwb.storePendingItem(content.ID, task)
+	} else {
+		// Queue is full - double the capacity instead of returning error.
 		if err := qwb.DoubleQueueCapacity(); err != nil {
-			// If capacity doubling fails, fall back to original error behavior
+			// If capacity doubling fails, fall back to original error behavior.
 			currentMaxQueueSize := qwb.getMaxQueueSizeProtected()
 			return fmt.Errorf("write queue is full (capacity: %d) and failed to double capacity: %v", currentMaxQueueSize, err)
 		}
 
-		// Try to queue again with the new doubled capacity
+		qwb.writeQueueMu.RLock()
+		queue = qwb.writeQueue
+		queued = false
 		select {
-		case qwb.writeQueue <- task:
-			// Successfully queued after capacity doubling
-			qwb.storePendingItem(content.ID, task)
+		case queue <- task:
+			queued = true
 		default:
-			// This should be very rare - the new queue is also full immediately
-			// This could happen under extreme load conditions
+		}
+		qwb.writeQueueMu.RUnlock()
+
+		if !queued {
 			currentMaxQueueSize := qwb.getMaxQueueSizeProtected()
 			return fmt.Errorf("write queue is still full even after doubling capacity to %d", currentMaxQueueSize)
 		}
+
+		qwb.storePendingItem(content.ID, task)
 	}
 
 	// Wait for result
@@ -568,8 +623,11 @@ func (qwb *QueuedWriteBatch) defaultErrorHandler(task *WriteTask, err error) {
 }
 
 func (qwb *QueuedWriteBatch) closeQueue() {
+	qwb.writeQueueMu.Lock()
+	defer qwb.writeQueueMu.Unlock()
 	if qwb.writeQueue != nil {
 		close(qwb.writeQueue)
+		qwb.writeQueue = nil
 	}
 }
 
@@ -699,11 +757,12 @@ func (qwb *QueuedWriteBatch) drainQueuedTasksNonBlocking() int {
 
 	var processedThisCall int
 	batch := make([]*WriteTask, 0, qwb.maxBatchSize)
+	queue := qwb.getWriteQueue()
 
 	// Non-blocking drain of writeQueue channel
 	for {
 		select {
-		case task := <-qwb.writeQueue:
+		case task := <-queue:
 			batch = append(batch, task)
 			processedThisCall++
 			if len(batch) >= qwb.maxBatchSize {
@@ -824,10 +883,12 @@ func (qwb *QueuedWriteBatch) SerializePendingTasks() ([]byte, string, error) {
 func (qwb *QueuedWriteBatch) SerializeWriteQueue() ([]byte, string, error) {
 	var tasks []*WriteTask
 
+	queue := qwb.getWriteQueue()
+
 	// Drain all tasks from write queue non-blocking
 	for {
 		select {
-		case task := <-qwb.writeQueue:
+		case task := <-queue:
 			tasks = append(tasks, task)
 		default:
 			// No more tasks in queue
@@ -889,7 +950,8 @@ func (qwb *QueuedWriteBatch) GetMaxQueueSize() int {
 // GetActualQueueDepth returns the actual number of items currently in the write queue channel
 // This provides the real queue state, unlike the broken QueueDepth metric
 func (qwb *QueuedWriteBatch) GetActualQueueDepth() int {
-	return len(qwb.writeQueue)
+	queue := qwb.getWriteQueue()
+	return len(queue)
 }
 
 // getMaxQueueSizeProtected returns the current maximum queue size with mutex protection

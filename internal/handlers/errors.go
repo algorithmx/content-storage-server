@@ -34,6 +34,17 @@ func sanitizeError(err error) string {
 		}
 	}
 
+	// Partial-match fallback:
+	// Some upstream error messages phrase "content not found" differently,
+	// e.g. "The content was not found in storage" does not contain the
+	// contiguous substring "content not found".
+	//
+	// We intentionally require both "content" and "not found" to avoid
+	// misclassifying unrelated "file not found" or other "not found" errors.
+	if strings.Contains(errMsg, "content") && strings.Contains(errMsg, "not found") {
+		return "Content not found"
+	}
+
 	// Default: generic error message to prevent information disclosure
 	return "An internal error occurred"
 }
