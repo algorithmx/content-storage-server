@@ -321,17 +321,17 @@ func (v *RequestValidator) validateBinaryData(data interface{}) error {
 
 // ValidateAccessLimit validates access limit bounds
 // accessLimit of 0 means "no access allowed" (content stored but cannot be retrieved)
-func (v *RequestValidator) ValidateAccessLimit(accessLimit int) error {
+func (v *RequestValidator) ValidateAccessLimit(accessLimit *int) error {
 	// 0 means no access allowed, which is valid
-	if accessLimit == 0 {
+	if accessLimit == nil || *accessLimit == 0 {
 		return nil
 	}
 
-	if accessLimit < 0 {
+	if *accessLimit < 0 {
 		return fmt.Errorf("access limit cannot be negative")
 	}
 
-	if accessLimit > v.config.MaxAccessLimit {
+	if *accessLimit > v.config.MaxAccessLimit {
 		return fmt.Errorf("access limit too high (max %d)", v.config.MaxAccessLimit)
 	}
 

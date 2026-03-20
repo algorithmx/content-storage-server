@@ -6,16 +6,13 @@ import (
 
 // matchesFilter checks if content matches the given filter criteria
 func (s *BadgerStorage) matchesFilter(content *models.Content, filter *ContentFilter) bool {
-	// Get current access count for expiration check
-	accessCount := s.accessManager.GetAccessCount(content.ID)
-
 	// If no filter provided, include all non-expired content by default
 	if filter == nil {
-		return !content.IsExpired(accessCount)
+		return !content.IsExpired()
 	}
 
 	// Check expiration status
-	if !filter.IncludeExpired && content.IsExpired(accessCount) {
+	if !filter.IncludeExpired && content.IsExpired() {
 		return false
 	}
 

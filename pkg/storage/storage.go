@@ -10,8 +10,11 @@ var (
 	// ErrContentNotFound is returned when content with the given ID is not found
 	ErrContentNotFound = errors.New("content not found")
 
-	// ErrContentExpired is returned when content has expired
+	// ErrContentExpired is returned when content has expired by time
 	ErrContentExpired = errors.New("content has expired")
+
+	// ErrAccessLimitReached is returned when content access limit has been exhausted
+	ErrAccessLimitReached = errors.New("content access limit reached")
 
 	// ErrSyncFailed is returned when content synchronization fails
 	ErrSyncFailed = errors.New("content synchronization failed")

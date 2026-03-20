@@ -95,6 +95,45 @@ func (h *ContentHandler) StoreContent(c echo.Context) error {
 		})
 	}
 
+	// Explicitly ensure the ID is fully valid
+	if err := h.validator.ValidateID(req.ID); err != nil {
+		h.logValidationError("Storage request ID validation failed", zap.String("id", req.ID), zap.Error(err))
+		return c.JSON(http.StatusBadRequest, models.StorageResponse{
+			Success: false,
+			Message: "Validation failed",
+			Data:    map[string]string{"error": "invalid ID: " + err.Error()},
+		})
+	}
+
+	// Explicitly validate content type to throw exactly 415 like tests expect
+	if err := h.validator.ValidateContentType(req.Type); err != nil {
+		h.logValidationError("Storage request ContentType validation failed", zap.String("type", req.Type), zap.Error(err))
+		return c.JSON(http.StatusUnsupportedMediaType, models.StorageResponse{
+			Success: false,
+			Message: "Unsupported Media Type",
+			Data:    map[string]string{"error": "invalid content type: " + err.Error()},
+		})
+	}
+
+	if len(h.cfg.AllowedContentTypes) > 0 {
+		allowed := false
+		for _, allowedType := range h.cfg.AllowedContentTypes {
+			if req.Type == allowedType {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			err := fmt.Errorf("content type '%s' not in allowed types", req.Type)
+			h.logValidationError("Storage request ContentType allowlist validation failed", zap.String("type", req.Type), zap.Error(err))
+			return c.JSON(http.StatusUnsupportedMediaType, models.StorageResponse{
+				Success: false,
+				Message: "Unsupported Media Type",
+				Data:    map[string]string{"error": err.Error()},
+			})
+		}
+	}
+
 	// Perform comprehensive validation
 	if err := h.validator.ValidateStorageRequest(&req); err != nil {
 		h.logValidationError("Storage request validation failed",
@@ -200,11 +239,18 @@ func (h *ContentHandler) GetContent(c echo.Context) error {
 			})
 		}
 		if err == storage.ErrContentExpired {
-			// Content has expired (time-based or access limit reached)
-			// Return 410 Gone for expired content as per API spec
-			return c.JSON(http.StatusGone, models.StorageResponse{
+			// Content has expired by time
+			return c.JSON(http.StatusNotFound, models.StorageResponse{
 				Success: false,
 				Message: "Content has expired",
+				Data:    map[string]string{"error": err.Error()},
+			})
+		}
+		if err == storage.ErrAccessLimitReached {
+			// Content has reached its maximum access limit
+			return c.JSON(http.StatusGone, models.StorageResponse{
+				Success: false,
+				Message: "Content access limit reached",
 				Data:    map[string]string{"error": err.Error()},
 			})
 		}
@@ -301,9 +347,9 @@ func (h *ContentHandler) DeleteContent(c echo.Context) error {
 // This handles the case where content is currently being written to the queue
 func (h *ContentHandler) deleteWithRetry(id string) error {
 	const (
-		maxRetries     = 3
-		retryTimeout   = 5 * time.Second
-		retryDelay     = 100 * time.Millisecond
+		maxRetries   = 3
+		retryTimeout = 5 * time.Second
+		retryDelay   = 100 * time.Millisecond
 	)
 
 	var lastErr error

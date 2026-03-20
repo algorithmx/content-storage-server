@@ -13,8 +13,7 @@ type Content struct {
 	Tag         string     `json:"tag,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	AccessLimit int        `json:"access_limit,omitempty"`
-	// AccessCount removed - now tracked separately in AccessTracker
+	AccessLimit *int       `json:"access_limit,omitempty"`
 }
 
 // AccessTracker tracks access count for a specific content item
@@ -38,19 +37,19 @@ func (at *AccessTracker) SetAccessCount(count int64) {
 	atomic.StoreInt64(&at.AccessCount, count)
 }
 
-// IsExpired checks if the content has expired based on time or access count
-// Now requires access count to be passed as parameter
-func (c *Content) IsExpired(accessCount int64) bool {
+// IsExpired checks if the content has expired based purely on time
+func (c *Content) IsExpired() bool {
 	// Check time-based expiration
 	if c.ExpiresAt != nil && time.Now().After(*c.ExpiresAt) {
 		return true
 	}
+	return false
+}
 
-	// Check access count-based expiration
-	// Content expires when access count reaches or exceeds the limit
-	// AccessLimit >= 0 means limit is set (0 = no access allowed, >0 = specific limit)
-	// AccessLimit < 0 means unlimited (not set)
-	if c.AccessLimit >= 0 && accessCount >= int64(c.AccessLimit) {
+// IsAccessExhausted checks if the content has exhausted its access count limit.
+// AccessLimit = nil means unlimited. AccessLimit = 0 means NO ACCESS.
+func (c *Content) IsAccessExhausted(accessCount int64) bool {
+	if c.AccessLimit != nil && accessCount >= int64(*c.AccessLimit) {
 		return true
 	}
 
@@ -70,7 +69,7 @@ type StorageRequest struct {
 	Type        string     `json:"type" validate:"required,max=100"`
 	Tag         string     `json:"tag,omitempty" validate:"omitempty,max=100"`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	AccessLimit int        `json:"access_limit,omitempty" validate:"omitempty,min=0,max=1000000"`
+	AccessLimit *int       `json:"access_limit,omitempty" validate:"omitempty,min=0,max=1000000"`
 }
 
 // StorageResponse represents a response from storage operations

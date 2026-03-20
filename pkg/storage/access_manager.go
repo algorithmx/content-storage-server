@@ -143,11 +143,14 @@ func (am *AccessManager) GetStats() map[string]interface{} {
 	}
 }
 
-// IsExpired checks if content has expired based on access count
+// IsExpired checks if content has expired based on access count or time
 // This is a convenience method that combines content expiration logic with access tracking
 func (am *AccessManager) IsExpired(content *models.Content) bool {
+	if content.IsExpired() {
+		return true
+	}
 	accessCount := am.GetAccessCount(content.ID)
-	return content.IsExpired(accessCount)
+	return content.IsAccessExhausted(accessCount)
 }
 
 // CreateContentWithAccess creates a ContentWithAccess struct that includes the current access count

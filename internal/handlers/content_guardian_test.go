@@ -79,7 +79,7 @@ func TestAccessCountNotIncrementedByStatusCheck(t *testing.T) {
 		Type:        "text/plain",
 		Data:        "test data",
 		CreatedAt:   time.Now(),
-		AccessLimit: 10,
+		AccessLimit: func() *int { v := 10; return &v }(),
 	}
 
 	// Store content synchronously to ensure it's persisted
@@ -114,7 +114,7 @@ func TestAccessCountNotIncrementedByStatusCheck(t *testing.T) {
 	accessCount := badgerStorage.GetAccessCount(contentID)
 	assert.Equal(t, int64(1), accessCount,
 		"Access count should be 1 after first retrieval, but got %d. "+
-		"Status checks may be incorrectly incrementing the count.", accessCount)
+			"Status checks may be incorrectly incrementing the count.", accessCount)
 }
 
 // TestAccessCountIncrementedByGetContent verifies that GetContent properly increments access count
@@ -131,7 +131,7 @@ func TestAccessCountIncrementedByGetContent(t *testing.T) {
 		Type:        "text/plain",
 		Data:        "test data",
 		CreatedAt:   time.Now(),
-		AccessLimit: 1000, // High limit for testing access count increments
+		AccessLimit: func() *int { v := 1000; return &v }(), // High limit for testing access count increments
 	}
 
 	// Store content
@@ -157,9 +157,9 @@ func TestAccessCountIncrementedByGetContent(t *testing.T) {
 	}
 }
 
-// TestExpiredContentReturns410 verifies Issue #2 fix:
+// TestAccessExpiredContentReturns404 verifies Issue #2 fix:
 // Expired content should return HTTP 410 Gone, not 500
-func TestExpiredContentReturns410(t *testing.T) {
+func TestAccessExpiredContentReturns404(t *testing.T) {
 	handler, badgerStorage, cleanup := setupTestHandler(t)
 	defer cleanup()
 
@@ -193,10 +193,10 @@ func TestExpiredContentReturns410(t *testing.T) {
 	err = handler.GetContent(c)
 	require.NoError(t, err)
 
-	// Should return 410 Gone, not 500
-	assert.Equal(t, http.StatusGone, rec.Code,
-		"Expired content should return 410 Gone, got %d. "+
-		"If 500, the handler is not properly handling ErrContentExpired", rec.Code)
+	// Should return 404 Not Found, not 500
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"Expired content should return 404 Not Found, got %d. "+
+			"If 500, the handler is not properly handling ErrContentExpired", rec.Code)
 }
 
 // TestAccessLimitEnforcement verifies that content expires when access limit is reached
@@ -216,7 +216,7 @@ func TestAccessLimitEnforcement(t *testing.T) {
 		Type:        "text/plain",
 		Data:        "test data",
 		CreatedAt:   time.Now(),
-		AccessLimit: 3,
+		AccessLimit: func() *int { v := 3; return &v }(),
 	}
 
 	// Store content
@@ -320,10 +320,10 @@ func TestIsExpiredLogic(t *testing.T) {
 				Type:        "text/plain",
 				Data:        "test",
 				CreatedAt:   time.Now(),
-				AccessLimit: tt.accessLimit,
+				AccessLimit: &tt.accessLimit,
 			}
 
-			result := content.IsExpired(tt.accessCount)
+			result := content.IsExpired() || content.IsAccessExhausted(tt.accessCount)
 			assert.Equal(t, tt.expired, result,
 				"IsExpired(%d) with limit %d should return %v, got %v",
 				tt.accessCount, tt.accessLimit, tt.expired, result)
@@ -331,8 +331,8 @@ func TestIsExpiredLogic(t *testing.T) {
 	}
 }
 
-// TestTimeExpiredContentReturns410 verifies that time-expired content returns 410
-func TestTimeExpiredContentReturns410(t *testing.T) {
+// TestTimeExpiredContentReturns404 verifies that time-expired content returns 404
+func TestTimeExpiredContentReturns404(t *testing.T) {
 	handler, badgerStorage, cleanup := setupTestHandler(t)
 	defer cleanup()
 
@@ -366,10 +366,10 @@ func TestTimeExpiredContentReturns410(t *testing.T) {
 	err = handler.GetContent(c)
 	require.NoError(t, err)
 
-	// Should return 410 Gone, not 500
-	assert.Equal(t, http.StatusGone, rec.Code,
-		"Time-expired content should return 410 Gone, got %d. "+
-		"If 500, the handler is not properly handling ErrContentExpired", rec.Code)
+	// Should return 404 Not Found, not 500
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"Time-expired content should return 404 Not Found, got %d. "+
+			"If 500, the handler is not properly handling ErrContentExpired", rec.Code)
 }
 
 // TestDeleteNonExistentContentReturns404 verifies Issue #4 fix:
@@ -393,7 +393,7 @@ func TestDeleteNonExistentContentReturns404(t *testing.T) {
 	// Should return 404 Not Found
 	assert.Equal(t, http.StatusNotFound, rec.Code,
 		"Deleting non-existent content should return 404 Not Found, got %d. "+
-		"If 200, the Delete operation is not checking existence properly", rec.Code)
+			"If 200, the Delete operation is not checking existence properly", rec.Code)
 }
 
 // TestDeleteExistingContentSucceeds verifies that deleting existing content works
@@ -459,11 +459,10 @@ func TestContentTypeValidationInPerformanceMode(t *testing.T) {
 	err := handler.StoreContent(c)
 	require.NoError(t, err)
 
-	// Should return 400 Bad Request (or 415 Unsupported Media Type if implemented)
-	// The current implementation returns 400 with validation error
-	assert.Equal(t, http.StatusBadRequest, rec.Code,
-		"Invalid content type should be rejected with 400 Bad Request, got %d. "+
-		"If 202, content type validation is not being enforced in performance mode", rec.Code)
+	// Should return 415 Unsupported Media Type for disallowed content types
+	assert.Equal(t, http.StatusUnsupportedMediaType, rec.Code,
+		"Invalid content type should be rejected with 415 Unsupported Media Type, got %d. "+
+			"If 202, content type validation is not being enforced in performance mode", rec.Code)
 
 	// Verify response contains content type error
 	responseBody := rec.Body.String()
@@ -507,7 +506,7 @@ func TestAllowedContentTypes(t *testing.T) {
 				assert.Equal(t, http.StatusAccepted, rec.Code,
 					"Allowed content type '%s' should be accepted, body: %s", tc.contentType, rec.Body.String())
 			} else {
-				assert.Equal(t, http.StatusBadRequest, rec.Code,
+				assert.Equal(t, http.StatusUnsupportedMediaType, rec.Code,
 					"Disallowed content type '%s' should be rejected", tc.contentType)
 			}
 		})
@@ -529,7 +528,7 @@ func TestAccessLimitZeroReturns410(t *testing.T) {
 		Type:        "text/plain",
 		Data:        "test data",
 		CreatedAt:   time.Now(),
-		AccessLimit: 0, // No access allowed
+		AccessLimit: func() *int { v := 0; return &v }(), // No access allowed
 	}
 
 	// Store content
