@@ -51,8 +51,8 @@ type QueuedWriteBatch struct {
 	queueResizeCh chan struct{}
 
 	// Queue growth limits to prevent unbounded memory growth
-	initialQueueSize int  // Initial queue size for calculating maximum limit
-	maxMultiplier    int  // Maximum multiplier of initial queue size (default: 10x)
+	initialQueueSize int // Initial queue size for calculating maximum limit
+	maxMultiplier    int // Maximum multiplier of initial queue size (default: 10x)
 }
 
 // QueuedWriteBatchOptions contains configuration for the queued write system
@@ -93,11 +93,11 @@ var (
 // NewQueuedWriteBatch creates a new queued write batch system
 func NewQueuedWriteBatch(db *badger.DB, opts QueuedWriteBatchOptions) *QueuedWriteBatch {
 	qwb := &QueuedWriteBatch{
-		writeQueue:   make(chan *WriteTask, opts.QueueSize),
-		maxQueueSize: opts.QueueSize,
-		batchTimeout: opts.BatchTimeout,
-		maxBatchSize: opts.BatchSize,
-		stopChan:     make(chan struct{}),
+		writeQueue:    make(chan *WriteTask, opts.QueueSize),
+		maxQueueSize:  opts.QueueSize,
+		batchTimeout:  opts.BatchTimeout,
+		maxBatchSize:  opts.BatchSize,
+		stopChan:      make(chan struct{}),
 		queueResizeCh: make(chan struct{}, 1),
 		metrics: QueueMetrics{
 			QueueDepth:      0,
@@ -243,36 +243,36 @@ endWorkerLoop:
 //
 // Returns error if critical operations fail, but shutdown continues regardless.
 func (qwb *QueuedWriteBatch) simpleFlush() error {
-    // Fast check if there's anything to flush
-    if qwb.pendingItems.IsEmpty() {
-        return nil
-    }
+	// Fast check if there's anything to flush
+	if qwb.pendingItems.IsEmpty() {
+		return nil
+	}
 
-    // 1. Send signal to worker first
-    qwb.stopWorker()
+	// 1. Send signal to worker first
+	qwb.stopWorker()
 
-    // 2. Drain any remaining tasks from writeQueue
-    // (tasks that worker didn't consume before stopping)
-    drainedCount := qwb.drainQueuedTasksNonBlocking()
-    if drainedCount > 0 {
-        time.Sleep(100 * time.Millisecond)
-    }
+	// 2. Drain any remaining tasks from writeQueue
+	// (tasks that worker didn't consume before stopping)
+	drainedCount := qwb.drainQueuedTasksNonBlocking()
+	if drainedCount > 0 {
+		time.Sleep(100 * time.Millisecond)
+	}
 
-    // 3. Force process any stuck tasks in pendingItems
-    // (tasks that worker consumed but didn't complete before stopping)
-    qwb.forceProcessStuckTasks()
+	// 3. Force process any stuck tasks in pendingItems
+	// (tasks that worker consumed but didn't complete before stopping)
+	qwb.forceProcessStuckTasks()
 
-    // 4. Brief wait for final database operations to complete
-    if drainedCount > 0 {
-        time.Sleep(100 * time.Millisecond)
-    }
+	// 4. Brief wait for final database operations to complete
+	if drainedCount > 0 {
+		time.Sleep(100 * time.Millisecond)
+	}
 
-    finalPending := qwb.GetPendingContentCount()
-    if finalPending > 0 {
-        return fmt.Errorf("simple flush incomplete: %d items still pending after worker stop and drain", finalPending)
-    }
+	finalPending := qwb.GetPendingContentCount()
+	if finalPending > 0 {
+		return fmt.Errorf("simple flush incomplete: %d items still pending after worker stop and drain", finalPending)
+	}
 
-    return nil
+	return nil
 }
 
 // processBatch processes a batch of write tasks using BadgerDB WriteBatch
@@ -345,9 +345,6 @@ func (qwb *QueuedWriteBatch) processBatch(tasks []*WriteTask) {
 
 		// Update metrics atomically - only decrement for items that were actually pending
 		atomic.AddInt64(&qwb.metrics.TotalProcessed, int64(len(tasks)))
-		if actuallyProcessedCount > 0 {
-			atomic.AddInt64(&qwb.metrics.QueueDepth, -int64(actuallyProcessedCount))
-		}
 
 		// Check if all pending items are now complete and notify flush waiters
 		qwb.notifications.checkAndNotifyFlushCompletion(qwb.pendingItems)
@@ -436,12 +433,10 @@ func (qwb *QueuedWriteBatch) DoubleQueueCapacity() error {
 func (qwb *QueuedWriteBatch) storePendingItem(contentID string, task *WriteTask) {
 	qwb.pendingItems.Store(contentID, task)
 	atomic.AddInt64(&qwb.metrics.TotalQueued, 1)
-	atomic.AddInt64(&qwb.metrics.QueueDepth, 1) // Atomically update queue depth
 }
 
 func (qwb *QueuedWriteBatch) removePendingItem(contentID string) {
 	qwb.pendingItems.Delete(contentID)
-	atomic.AddInt64(&qwb.metrics.QueueDepth, -1) // Atomically update queue depth
 }
 
 // QueueWrite queues a write operation asynchronously
@@ -588,11 +583,8 @@ func (qwb *QueuedWriteBatch) WaitForContentWrite(contentID string, timeout time.
 func (qwb *QueuedWriteBatch) handleTaskError(task *WriteTask, err error) {
 	atomic.AddInt64(&qwb.metrics.TotalErrors, 1)
 
-	// Remove from pending items on error - only decrement if item was actually present
-	if _, wasPresent := qwb.pendingItems.LoadAndDelete(task.Content.ID); wasPresent {
-		// Update queue depth atomically only if item was actually pending
-		atomic.AddInt64(&qwb.metrics.QueueDepth, -1)
-	}
+	// Remove from pending items on error
+	qwb.pendingItems.LoadAndDelete(task.Content.ID)
 
 	// Notify completion waiters for this specific content ID (even on error)
 	qwb.notifications.notifyCompletion(task.Content.ID)
@@ -704,7 +696,7 @@ func (qwb *QueuedWriteBatch) stopChanClosed() bool {
 func (qwb *QueuedWriteBatch) GetMetrics() QueueMetrics {
 	// All fields are read atomically - no mutex needed
 	return QueueMetrics{
-		QueueDepth:      atomic.LoadInt64(&qwb.metrics.QueueDepth),
+		QueueDepth:      int64(qwb.GetActualQueueDepth()),
 		TotalQueued:     atomic.LoadInt64(&qwb.metrics.TotalQueued),
 		TotalProcessed:  atomic.LoadInt64(&qwb.metrics.TotalProcessed),
 		TotalErrors:     atomic.LoadInt64(&qwb.metrics.TotalErrors),
@@ -928,11 +920,11 @@ func (qwb *QueuedWriteBatch) GetHealthStatus() HealthStatus {
 	}
 
 	// Simple check: if queue is very full, it's degraded
-	metrics := qwb.GetMetrics()
+	actualDepth := qwb.GetActualQueueDepth()
 
 	currentMaxQueueSize := qwb.getMaxQueueSizeProtected()
 
-	if float64(metrics.QueueDepth)/float64(currentMaxQueueSize) > 0.8 {
+	if float64(actualDepth)/float64(currentMaxQueueSize) > 0.8 {
 		return HealthStatusDegraded
 	}
 

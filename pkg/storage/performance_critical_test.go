@@ -582,3 +582,259 @@ func TestHealthStatusWithInaccurateDepth(t *testing.T) {
 			actualUtil*100, metricUtil*100)
 	}
 }
+
+func TestHealthStatusAccurateDegradation(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "badger-health-degrade-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	opts := badger.DefaultOptions(tempDir)
+	opts.Logger = nil
+	db, err := badger.Open(opts)
+	if err != nil {
+		t.Fatalf("Failed to open BadgerDB: %v", err)
+	}
+	defer db.Close()
+
+	// Initial size 10 to easily trigger capacity doublings or degrade status
+	qwb := NewQueuedWriteBatch(db, QueuedWriteBatchOptions{
+		QueueSize:    10,
+		BatchSize:    100,
+		BatchTimeout: 10 * time.Second,
+	})
+
+	// Create tasks until queue health status degrades to >0.8 max size
+	// (note: writes might be processed during insertion)
+	qwb.capacityMutex.Lock()
+	maxSize := qwb.maxQueueSize
+	qwb.capacityMutex.Unlock()
+
+	for i := 0; i < 11; i++ {
+		content := &models.Content{
+			ID:   fmt.Sprintf("health-degrade-%d", i),
+			Type: "text/plain",
+			Data: "test data",
+		}
+		_ = qwb.QueueWrite(content)
+	}
+
+	status := qwb.GetHealthStatus()
+	actualDepth := qwb.GetActualQueueDepth()
+	metrics := qwb.GetMetrics()
+
+	t.Logf("Health degraded check -> Status: %v, Actual: %d, Metric: %d", status, actualDepth, metrics.QueueDepth)
+	if actualDepth > int(float64(maxSize)*0.8) && status != HealthStatusDegraded {
+		t.Errorf("Expected HealthStatusDegraded when queue > 80%% full, got: %v", status)
+	}
+	if actualDepth <= int(float64(maxSize)*0.8) && status == HealthStatusDegraded {
+		t.Errorf("Did not expect HealthStatusDegraded when queue <= 80%% full, got: %v", status)
+	}
+
+	qwb.Stop()
+}
+
+func TestDuplicateQueueWriteMetricsAccuracy(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "badger-metrics-duplicates-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	opts := badger.DefaultOptions(tempDir)
+	opts.Logger = nil
+	db, err := badger.Open(opts)
+	if err != nil {
+		t.Fatalf("Failed to open BadgerDB: %v", err)
+	}
+	defer db.Close()
+
+	qwb := NewQueuedWriteBatch(db, QueuedWriteBatchOptions{
+		QueueSize:    50,
+		BatchSize:    5,
+		BatchTimeout: 10 * time.Second, // Long enough to ensure worker doesn't process them quickly
+	})
+
+	// Add the exact same item multiple times
+	for i := 0; i < 15; i++ {
+		content := &models.Content{
+			ID:   "duplicate-id",
+			Type: "text/plain",
+			Data: fmt.Sprintf("data-%d", i),
+		}
+		if err := qwb.QueueWrite(content); err != nil {
+			t.Fatalf("Failed to queue duplicate: %v", err)
+		}
+	}
+
+	actualDepth := qwb.GetActualQueueDepth()
+	metrics := qwb.GetMetrics()
+
+	if int(metrics.QueueDepth) != actualDepth {
+		t.Errorf("Duplicate item writes caused QueueDepth metric mismatch! Actual: %d, Metric: %d", actualDepth, metrics.QueueDepth)
+	}
+
+	if metrics.TotalQueued != 15 {
+		t.Errorf("TotalQueued expected to be 15, got %d", metrics.TotalQueued)
+	}
+
+	qwb.Stop()
+}
+
+func TestQueueWriteAfterStopReturnsError(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "badger-stop-write-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	opts := badger.DefaultOptions(tempDir)
+	opts.Logger = nil
+	db, err := badger.Open(opts)
+	if err != nil {
+		t.Fatalf("Failed to open BadgerDB: %v", err)
+	}
+	defer db.Close()
+
+	qwb := NewQueuedWriteBatch(db, QueuedWriteBatchOptions{
+		QueueSize:    10,
+		BatchSize:    10,
+		BatchTimeout: 1 * time.Second,
+	})
+
+	// Stop the queue
+	qwb.Stop()
+
+	// Try to write
+	content := &models.Content{
+		ID:   "write-after-stop",
+		Type: "text/plain",
+		Data: "test data",
+	}
+
+	err = qwb.QueueWrite(content)
+	if err == nil {
+		t.Errorf("Expected error when queuing write after Stop(), got nil")
+	}
+
+	// Also test sync write
+	err = qwb.QueueWriteSync(content)
+	if err == nil {
+		t.Errorf("Expected error when calling QueueWriteSync after Stop(), got nil")
+	}
+}
+
+func TestQueueWriteSyncAndWaits(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "badger-sync-write-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	opts := badger.DefaultOptions(tempDir)
+	opts.Logger = nil
+	db, err := badger.Open(opts)
+	if err != nil {
+		t.Fatalf("Failed to open BadgerDB: %v", err)
+	}
+	defer db.Close()
+
+	qwb := NewQueuedWriteBatch(db, QueuedWriteBatchOptions{
+		QueueSize:    10,
+		BatchSize:    2,
+		BatchTimeout: 10 * time.Millisecond,
+	})
+	defer qwb.Stop()
+
+	// Test QueueWriteSync
+	contentSync := &models.Content{
+		ID:   "sync-write-id",
+		Type: "text/plain",
+		Data: "sync data",
+	}
+
+	err = qwb.QueueWriteSync(contentSync)
+	if err != nil {
+		t.Errorf("Unexpected error from QueueWriteSync: %v", err)
+	}
+
+	// Wait, the item should be in the DB now.
+	// Let's test WaitForContentWrite.
+	contentAsync := &models.Content{
+		ID:   "async-write-id",
+		Type: "text/plain",
+		Data: "async data",
+	}
+
+	// This shouldn't be processed immediately if batch size is > 1
+	err = qwb.QueueWrite(contentAsync)
+	if err != nil {
+		t.Fatalf("Failed to queue write: %v", err)
+	}
+
+	err = qwb.WaitForContentWrite("async-write-id", 5*time.Second)
+	if err != nil {
+		t.Errorf("Failed to wait for content write: %v", err)
+	}
+
+	// Wait for non-existent item should return nil immediately since not in queue
+	err = qwb.WaitForContentWrite("non-existent-id", 5*time.Second)
+	if err != nil {
+		t.Errorf("Expected immediate return nil for non-existent-id, got error: %v", err)
+	}
+}
+
+func TestEmergencyStopShutsDownQuickly(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "badger-emergency-stop-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	opts := badger.DefaultOptions(tempDir)
+	opts.Logger = nil
+	db, err := badger.Open(opts)
+	if err != nil {
+		t.Fatalf("Failed to open BadgerDB: %v", err)
+	}
+	defer db.Close()
+
+	qwb := NewQueuedWriteBatch(db, QueuedWriteBatchOptions{
+		QueueSize:    100,
+		BatchSize:    10,
+		BatchTimeout: 10 * time.Second,
+	})
+
+	for i := 0; i < 50; i++ {
+		content := &models.Content{
+			ID:   fmt.Sprintf("emerg-%d", i),
+			Type: "text/plain",
+			Data: "test data",
+		}
+		_ = qwb.QueueWrite(content)
+	}
+
+	// Should have uncompleted tasks
+	if qwb.GetPendingContentCount() == 0 {
+		t.Fatalf("Expected some pending tasks")
+	}
+
+	start := time.Now()
+	qwb.EmergencyStop() // Should return instantly
+	dur := time.Since(start)
+
+	if dur > 50*time.Millisecond {
+		t.Errorf("EmergencyStop took too long: %v, expected < 50ms", dur)
+	}
+
+	// We can't use QueueWrite anymore
+	content := &models.Content{
+		ID:   "post-emerg",
+		Type: "text/plain",
+		Data: "test data",
+	}
+	if err := qwb.QueueWrite(content); err == nil {
+		t.Errorf("Expected error writing after EmergencyStop")
+	}
+}
